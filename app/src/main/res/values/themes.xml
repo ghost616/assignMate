@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Material3 无 ActionBar 应用主题。
+        XML 层主题仅服务于系统窗口、启动帧与 Activity 启动前阶段；
+        界面实际配色由 Compose MaterialTheme（ui/theme）接管，二者色值保持一致。
+        低蓝光/儿童主题通过 values-night 配色自动切换。
+    -->
+    <style name="Theme.AssignMate" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/color_primary</item>
+        <item name="colorOnPrimary">@color/color_on_primary</item>
+        <item name="colorPrimaryContainer">@color/color_primary_container</item>
+        <item name="colorSecondary">@color/color_secondary</item>
+        <item name="colorError">@color/color_error</item>
+        <item name="android:windowBackground">@color/screen_background</item>
+        <item name="android:statusBarColor">@color/screen_background</item>
+        <item name="android:navigationBarColor">@color/screen_background</item>
+    </style>
+</resources>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 夜间：低蓝光暗色变体（暖棕黑基调，降低蓝光刺激） -->
+    <color name="color_primary">#93C5FD</color>
+    <color name="color_on_primary">#1E3A8A</color>
+    <color name="color_primary_container">#1E3A8A</color>
+    <color name="color_on_primary_container">#DBEAFE</color>
+    <color name="color_secondary">#FCD34D</color>
+    <color name="color_on_secondary">#78350F</color>
+    <color name="color_secondary_container">#78350F</color>
+    <color name="color_on_secondary_container">#FEF3C7</color>
+    <color name="screen_background">#171310</color>
+    <color name="surface_background">#1F1A14</color>
+    <color name="content_text">#EDE6DA</color>
+    <!-- 错误色夜间变体：柔和暖红，暗色背景上保持可辨识且低蓝光 -->
+    <color name="color_error">#D98C82</color>
+    <!-- 启动图标背景夜间沿用深蓝主色（与前景白色书本对比清晰） -->
+    <color name="ic_launcher_background">#1E3A8A</color>
+</resources>

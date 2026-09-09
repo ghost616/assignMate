@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 启动图标前景：白色"打开的书本"，页面上的蓝色横线为"作业行"（与背景色一致的切割线） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 左页 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M29,44 Q40,38 52,44 L52,72 Q40,66 29,72 Z" />
+    <!-- 右页 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M56,44 Q68,38 79,44 L79,72 Q68,66 56,72 Z" />
+    <!-- 作业文字行（左页 3 行） -->
+    <path
+        android:strokeColor="#3B82F6"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M34,49 L48,49 M34,55.5 L48,55.5 M34,62 L48,62" />
+    <!-- 作业文字行（右页 3 行） -->
+    <path
+        android:strokeColor="#3B82F6"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M61,49 L74,49 M61,55.5 L74,55.5 M61,62 L74,62" />
+</vector>

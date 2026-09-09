@@ -1,0 +1,24 @@
+# Gradle
+.gradle/
+build/
+
+# 本地 SDK 路径（随机器环境变化，不入库）
+local.properties
+
+# IDE
+.idea/
+*.iml
+.kotlin/
+
+# Android 构建产物
+captures/
+*.apk
+*.aab
+output.json
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# DSH 模块代理元数据（不入库）
+.module_agent/

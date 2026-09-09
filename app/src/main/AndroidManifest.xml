@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 相机：作业拍照 OCR 识别 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- 录音：语音输入/识别 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 网络：在线能力预留（OCR 云端识别 / 数据同步） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 通知：作业提醒与计时完成通知（Android 13+ 需运行时申请） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 精确闹钟：作业/休息提醒（Android 12+ 由用户在系统闹钟页授予） -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- 前台服务：专注计时走秒 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- 相机非必需：无相机设备也可安装（OCR 非唯一录入方式） -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
+    <application
+        android:name=".AssignMateApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AssignMate">
+
+        <!-- 单 Activity 宿主：加载 Compose 导航宿主 -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.AssignMate">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

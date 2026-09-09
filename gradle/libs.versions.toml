@@ -1,0 +1,103 @@
+# assignMate version catalog：集中管理构建插件与依赖版本
+# 供 :app / core / 各 feature 模块统一引用，禁止在模块内散落魔法版本号
+
+[versions]
+# ---- 构建工具链 ----
+# AGP 8.7.x：JDK21 运行环境兼容，最低 Gradle 8.9；compileSdk 最高支持 35
+agp = "8.7.3"
+kotlin = "2.0.21"
+ksp = "2.0.21-1.0.28"
+# Compose 编译器插件随 Kotlin 版本发布（org.jetbrains.kotlin.plugin.compose），无需单独维护
+
+# ---- AndroidX ----
+composeBom = "2024.12.01"
+androidxCore = "1.13.1"
+activityCompose = "1.9.3"
+lifecycle = "2.8.7"
+navigationCompose = "2.8.5"
+androidxHiltNavigationCompose = "1.2.0"
+
+# ---- DI / 数据层 ----
+hilt = "2.52"
+room = "2.6.1"
+datastore = "1.1.1"
+
+# ---- 网络层（预留在线能力） ----
+retrofit = "2.11.0"
+okhttp = "4.12.0"
+
+# ---- 异步 ----
+coroutines = "1.9.0"
+
+# ---- 主题（XML 层 Material Components，供 Manifest/系统窗口主题使用） ----
+material = "1.12.0"
+
+# ---- 测试 ----
+junit = "4.13.2"
+mockk = "1.13.13"
+androidxTestJunit = "1.2.1"
+androidxTestRunner = "1.6.2"
+espresso = "3.6.1"
+
+[libraries]
+# ---- AndroidX 基础 ----
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "androidxCore" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
+androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
+androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+
+# ---- Compose（版本由 BOM 统一治理） ----
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
+
+# ---- 导航 ----
+androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
+
+# ---- Hilt 依赖注入 ----
+hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }
+hilt-compiler = { group = "com.google.dagger", name = "hilt-compiler", version.ref = "hilt" }
+androidx-hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-compose", version.ref = "androidxHiltNavigationCompose" }
+
+# ---- Room（本地数据库） ----
+androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+
+# ---- DataStore（偏好存储） ----
+androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+
+# ---- 网络层（预留在线能力） ----
+retrofit = { group = "com.squareup.retrofit2", name = "retrofit", version.ref = "retrofit" }
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+okhttp-logging-interceptor = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
+
+# ---- 协程 ----
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+
+# ---- Material Components（XML 层主题） ----
+material = { group = "com.google.android.material", name = "material", version.ref = "material" }
+
+# ---- 单元测试 ----
+junit4 = { group = "junit", name = "junit", version.ref = "junit" }
+mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
+
+# ---- Android 仪器测试 ----
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestJunit" }
+androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTestRunner" }
+androidx-test-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
+hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }

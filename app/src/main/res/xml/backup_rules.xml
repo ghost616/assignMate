@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 备份/恢复规则（fullBackupContent）：默认仅备份共享偏好。
+     作业数据、OCR 密钥等敏感数据策略由 core 数据层后续按需收紧/扩展。 -->
+<full-backup-content>
+    <include domain="sharedpref" path="." />
+</full-backup-content>
