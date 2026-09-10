@@ -27,12 +27,16 @@ import com.assignmate.app.core.ui.components.CoreLoadingPlaceholder
 import com.assignmate.app.core.ui.theme.AssignMateTheme
 
 /**
- * 学生端首页占位：展示“当前学生姓名/家长账号归属”等会话信息，
- * 并标注作业清单待 homework 模块填充；提供退出登录回到身份选择页。
+ * 学生端首页：展示“当前学生姓名/家长账号归属”等会话信息，并提供“进入我的作业”入口
+ * 与退出登录（回身份选择页）。
+ *
+ * @param onEnterHomework 进入我的作业：导航侧使用当前学生会话的 studentId 打开 homework
+ *   作业清单（学生会话由“家长账号 + 验证码”进入时写入）；默认空实现，保证既有接线兼容。
  */
 @Composable
 fun StudentHomeRoute(
     onLoggedOut: () -> Unit,
+    onEnterHomework: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: StudentHomeViewModel = hiltViewModel(),
 ) {
@@ -47,6 +51,7 @@ fun StudentHomeRoute(
     StudentHomeContent(
         uiState = uiState,
         onLogout = viewModel::onLogoutClick,
+        onEnterHomework = onEnterHomework,
         modifier = modifier,
     )
 }
@@ -56,6 +61,7 @@ fun StudentHomeRoute(
 fun StudentHomeContent(
     uiState: StudentHomeUiState,
     onLogout: () -> Unit,
+    onEnterHomework: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -129,12 +135,18 @@ fun StudentHomeContent(
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "作业清单即将上线（由 homework 模块填充）",
+                            text = "点下方按钮查看你的作业清单",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
+                Spacer(modifier = Modifier.height(16.dp))
+                AssignMateBigButton(
+                    text = "📚 进入我的作业",
+                    onClick = onEnterHomework,
+                    containerColor = MaterialTheme.colorScheme.primary,
+                )
                 Spacer(modifier = Modifier.height(24.dp))
                 AssignMateBigButton(
                     text = "退出登录",
@@ -158,6 +170,7 @@ private fun StudentHomeContentPreview() {
                 studentName = "小明",
             ),
             onLogout = {},
+            onEnterHomework = {},
         )
     }
 }

@@ -44,12 +44,17 @@ import com.assignmate.app.core.ui.components.CoreLoadingPlaceholder
 
 /**
  * 家长主界面：学生档案卡片列表 + 添加（≤5 拦截）+ 改名 + 重置/修改验证码 +
- * 删除确认 + “进入某学生作业界面”占位入口（待 homework 模块落地）。
+ * 删除确认 + “进入某学生作业界面”。
+ *
+ * @param onEnterHomework 进入某学生作业界面：回调携带被选学生 id（家长会话本身无 studentId，
+ *   必须显式传递），由 NavHost 以 studentId 参数导航到 homework 作业清单；
+ *   默认空实现，保证既有接线（framework NavHost 旧调用点）继续编译通过。
  */
 @Composable
 fun ParentHomeRoute(
     onSessionExpired: () -> Unit,
     onLoggedOut: () -> Unit,
+    onEnterHomework: (Long) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: ParentHomeViewModel = hiltViewModel(),
 ) {
@@ -63,6 +68,7 @@ fun ParentHomeRoute(
                     duration = SnackbarDuration.Long,
                 )
 
+                is ParentHomeEvent.EnterHomework -> onEnterHomework(event.studentId)
                 ParentHomeEvent.SessionExpired -> onSessionExpired()
                 ParentHomeEvent.LoggedOut -> onLoggedOut()
             }

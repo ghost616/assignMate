@@ -3,9 +3,11 @@ package com.assignmate.app.core.data.db
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
+import com.assignmate.app.core.data.db.dao.HomeworkItemDao
 import com.assignmate.app.core.data.db.dao.OcrRetryTaskDao
 import com.assignmate.app.core.data.db.dao.ParentAccountDao
 import com.assignmate.app.core.data.db.dao.StudentDao
+import com.assignmate.app.core.data.db.entity.HomeworkItemEntity
 import com.assignmate.app.core.data.db.entity.OcrRetryTaskEntity
 import com.assignmate.app.core.data.db.entity.ParentAccountEntity
 import com.assignmate.app.core.data.db.entity.StudentEntity
@@ -27,6 +29,7 @@ import com.assignmate.app.core.domain.util.CoreConstants
         OcrRetryTaskEntity::class,
         ParentAccountEntity::class,
         StudentEntity::class,
+        HomeworkItemEntity::class,
     ],
     version = CoreConstants.DATABASE_VERSION,
     exportSchema = true,
@@ -42,4 +45,7 @@ abstract class AppDatabase : RoomDatabase() {
 
     /** 学生档案 DAO（auth/家庭管理模块使用） */
     abstract fun studentDao(): StudentDao
+
+    /** 作业项 DAO（homework 模块使用） */
+    abstract fun homeworkItemDao(): HomeworkItemDao
 }

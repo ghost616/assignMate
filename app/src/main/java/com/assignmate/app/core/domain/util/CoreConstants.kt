@@ -17,9 +17,10 @@ object CoreConstants {
      * 统一在 core.data.db.AppDatabase 中注册实体并在此版本号 +1，同时补充 Migration（见 DatabaseModule），
      * 禁止使用破坏性降级（fallbackToDestructiveMigration）。
      *
-     * 版本演进：v1 = ocr_retry_task（待重试 OCR 任务）；v2 = +parent_account（家长账号）、+student（学生档案）。
+     * 版本演进：v1 = ocr_retry_task（待重试 OCR 任务）；v2 = +parent_account（家长账号）、+student（学生档案）；
+     * v3 = +homework_item（作业项）。
      */
-    const val DATABASE_VERSION = 2
+    const val DATABASE_VERSION = 3
 
     // ---- DataStore 偏好存储 ----
     /** 全局偏好 DataStore 文件名（OCR 厂商配置等键值存放于此） */

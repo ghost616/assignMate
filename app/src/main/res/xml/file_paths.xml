@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 可共享路径：仅暴露应用私有缓存下的 homework 目录（拍照/相册识别用图片）。
+     用于作业拍照录入把临时图片文件交给系统相机写入（ACTION_IMAGE_CAPTURE 需 content:// URI）。 -->
+<paths>
+    <cache-path
+        name="homework_images"
+        path="homework/" />
+</paths>

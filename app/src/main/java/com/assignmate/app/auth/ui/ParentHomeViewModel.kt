@@ -27,7 +27,8 @@ import kotlinx.coroutines.launch
 
 /**
  * 家长主界面 ViewModel：学生档案列表 + 添加/改名/删除 + 验证码查看/重置/自定义 +
- * 登出；学生列表始终以家长会话 id 为维度刷新（仓库侧同步兜底上限/唯一性校验）。
+ * 进入某学生作业界面（发导航事件，携带被选学生 id）+ 登出；
+ * 学生列表始终以家长会话 id 为维度刷新（仓库侧同步兜底上限/唯一性校验）。
  */
 @HiltViewModel
 class ParentHomeViewModel @Inject constructor(
@@ -309,15 +310,12 @@ class ParentHomeViewModel @Inject constructor(
 
     // ---- 其它 ----
 
-    /** “进入某学生作业界面”占位：作业功能待 homework 模块落地 */
+    /**
+     * “进入某学生作业界面”：家长会话不携带 studentId，须显式把被选学生 id 交给导航侧，
+     * 由导航以 studentId 参数打开 homework 作业清单；本模块不实现作业业务。
+     */
     fun onEnterHomework(student: Student) {
-        viewModelScope.launch {
-            _events.send(
-                ParentHomeEvent.ShowMessage(
-                    "「${student.name}」的作业界面即将上线，敬请期待",
-                ),
-            )
-        }
+        viewModelScope.launch { _events.send(ParentHomeEvent.EnterHomework(student.id)) }
     }
 
     fun onLogoutClick() {
@@ -358,6 +356,12 @@ sealed interface ParentHomeEvent {
 
     /** 一次性提示（Snackbar/对话框关闭后的确认信息） */
     data class ShowMessage(val message: String) : ParentHomeEvent
+
+    /**
+     * 进入某学生作业界面：携带被选学生 id（家长会话无 studentId），
+     * 导航侧据此以 studentId 参数打开 homework 作业清单。
+     */
+    data class EnterHomework(val studentId: Long) : ParentHomeEvent
 
     /** 会话失效（非家长角色打开本页） */
     data object SessionExpired : ParentHomeEvent

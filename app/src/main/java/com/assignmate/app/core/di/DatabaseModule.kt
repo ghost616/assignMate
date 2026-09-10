@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.assignmate.app.core.data.db.AppDatabase
+import com.assignmate.app.core.data.db.dao.HomeworkItemDao
 import com.assignmate.app.core.data.db.dao.OcrRetryTaskDao
 import com.assignmate.app.core.data.db.dao.ParentAccountDao
 import com.assignmate.app.core.data.db.dao.StudentDao
@@ -63,6 +64,51 @@ object DatabaseModule {
         }
     }
 
+    /** v2 -> v3：新增作业项表 homework_item（含外键与常用查询索引）。 */
+    val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `homework_item` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`parent_account_id` INTEGER NOT NULL, " +
+                    "`student_id` INTEGER NOT NULL, " +
+                    "`content` TEXT NOT NULL, " +
+                    "`type` TEXT NOT NULL, " +
+                    "`stage_range` TEXT, " +
+                    "`deadline` INTEGER, " +
+                    "`priority` INTEGER NOT NULL, " +
+                    "`start_time` INTEGER, " +
+                    "`estimated_minutes` INTEGER, " +
+                    "`status` TEXT NOT NULL, " +
+                    "`created_by_role` TEXT NOT NULL, " +
+                    "`created_at` INTEGER NOT NULL, " +
+                    "FOREIGN KEY(`student_id`) REFERENCES `student`(`id`) " +
+                    "ON UPDATE NO ACTION ON DELETE CASCADE " +
+                    ")",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_homework_item_parent_account_id` " +
+                    "ON `homework_item` (`parent_account_id`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_homework_item_student_id` " +
+                    "ON `homework_item` (`student_id`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_homework_item_student_id_status` " +
+                    "ON `homework_item` (`student_id`, `status`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_homework_item_student_id_priority` " +
+                    "ON `homework_item` (`student_id`, `priority`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_homework_item_student_id_start_time` " +
+                    "ON `homework_item` (`student_id`, `start_time`)",
+            )
+        }
+    }
+
     @Provides
     @Singleton
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
@@ -70,7 +116,7 @@ object DatabaseModule {
             context,
             AppDatabase::class.java,
             CoreConstants.DATABASE_NAME,
-        ).addMigrations(MIGRATION_1_2).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
 
     @Provides
     fun provideOcrRetryTaskDao(database: AppDatabase): OcrRetryTaskDao = database.ocrRetryTaskDao()
@@ -80,4 +126,7 @@ object DatabaseModule {
 
     @Provides
     fun provideStudentDao(database: AppDatabase): StudentDao = database.studentDao()
+
+    @Provides
+    fun provideHomeworkItemDao(database: AppDatabase): HomeworkItemDao = database.homeworkItemDao()
 }
