@@ -37,6 +37,7 @@ internal fun HomeworkOrderResult.toUserMessage(): String = when (this) {
     HomeworkOrderResult.Success -> "顺序已调整"
     HomeworkOrderResult.NotFound -> "作业不存在，可能已被删除"
     HomeworkOrderResult.PermissionDenied -> PERMISSION_DENIED_HINT
+    HomeworkOrderResult.LockedWorkInProgress -> WORK_IN_PROGRESS_LOCKED_HINT
 }
 
 /** 时间排定结果文案（成功文案包含排定结果说明） */
@@ -48,6 +49,7 @@ internal fun ScheduleUpdateResult.toUserMessage(): String = when (this) {
     ScheduleUpdateResult.TimeConflict -> "这段时间已有其它作业安排，请换一个时间"
     ScheduleUpdateResult.InvalidEstimatedMinutes -> "预估时长需要是 1-600 之间的整数（分钟）"
     ScheduleUpdateResult.StatusTransitionDenied -> "当前状态不支持重新排定时间"
+    ScheduleUpdateResult.LockedWorkInProgress -> WORK_IN_PROGRESS_LOCKED_HINT
 }
 
 /** 通用操作结果文案（successMessage 由调用方按动作定制） */
@@ -57,6 +59,7 @@ internal fun HomeworkOperationResult.toUserMessage(successMessage: String): Stri
     HomeworkOperationResult.PermissionDenied -> PERMISSION_DENIED_HINT
     is HomeworkOperationResult.TemplateInvalid -> error.toUserMessage()
     is HomeworkOperationResult.ContentInvalid -> error.toUserMessage()
+    HomeworkOperationResult.LockedWorkInProgress -> WORK_IN_PROGRESS_LOCKED_HINT
 }
 
 /** 清单卡片信息：类型 + 阶段范围 + 截止时间的组合展示文案 */
@@ -78,3 +81,11 @@ internal const val PERMISSION_DENIED_HINT = "学生只能修改或删除自己�
  * 时间排定与状态流转按「是否是本人名下作业」判定，与录入者角色无关。
  */
 internal const val EXECUTE_PERMISSION_DENIED_HINT = "只能操作自己名下的作业"
+
+/**
+ * 进行中锁定提示（需求假设 C）：作业进入「进行中」后不允许再调整优先级与时间排定，
+ * 对应 [com.assignmate.app.homework.data.HomeworkOrderResult.LockedWorkInProgress] /
+ * [com.assignmate.app.homework.data.ScheduleUpdateResult.LockedWorkInProgress] /
+ * [com.assignmate.app.homework.data.HomeworkOperationResult.LockedWorkInProgress]。
+ */
+internal const val WORK_IN_PROGRESS_LOCKED_HINT = "作业已开始，不能再调整顺序或时间"

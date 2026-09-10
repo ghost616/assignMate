@@ -64,4 +64,66 @@ interface HomeworkItemDao : BaseDao<HomeworkItemEntity> {
         items.forEach { ids += insert(it) }
         return ids
     }
+
+    /**
+     * 事务化的「落位重排」：把 [homeworkId] 移动到 [targetIndex]（越界收敛），
+     * 其余项顺延并按 MIN_PRIORITY 起等步长整体重排优先级。
+     *
+     * 为什么放在 DAO：仓库层需要「读全清单 → 计算新顺序 → 批量写优先级」三段原子完成，
+     * 否则读与写之间作业可能被并发置为「进行中」或被删除，导致完成一次已失效的重排
+     * （进行中锁定的判定依据在写入前已过期）。@Transaction 默认方法由 Room 生成单事务实现。
+     *
+     * 事务内会重读清单并在写入前复查 [LOCKED_STATUS]（进行中锁定），命中则不改动任何数据。
+     * 业务规则（谁能调序、优先级步长）仍在 homework 层，本方法只承载锁定这一与写入原子性强绑定的守卫。
+     */
+    @Transaction
+    suspend fun moveToPositionInTransaction(homeworkId: Long, targetIndex: Int): MovePositionOutcome {
+        val item = findById(homeworkId) ?: return MovePositionOutcome.NOT_FOUND
+        if (item.status == LOCKED_STATUS) {
+            return MovePositionOutcome.LOCKED
+        }
+        val ordered = loadByStudent(item.studentId)
+        val from = ordered.indexOfFirst { it.id == homeworkId }
+        if (from < 0) {
+            return MovePositionOutcome.NOT_FOUND
+        }
+        val to = targetIndex.coerceIn(0, ordered.lastIndex)
+        if (from == to) {
+            return MovePositionOutcome.SUCCESS
+        }
+        val reordered = ordered.toMutableList().apply { add(to, removeAt(from)) }
+        reordered.forEachIndexed { index, entity ->
+            val expected = MIN_PRIORITY + index * PRIORITY_STEP
+            if (entity.priority != expected) {
+                update(entity.copy(priority = expected))
+            }
+        }
+        return MovePositionOutcome.SUCCESS
+    }
+}
+
+/**
+ * 进行中锁定状态列取值（与 homework 的 HomeworkStatus.IN_PROGRESS.name 同值）；
+ * DAO 侧只做该单一状态的守卫比较，不依赖业务枚举，避免 core → homework 的反向依赖。
+ *
+ * 未放到接口 companion 内是因为该常量被 [HomeworkItemDao.moveToPositionInTransaction]
+ * 这一接口默认方法直接引用，而接口默认方法内不能引用本接口 companion 的成员。
+ */
+private const val LOCKED_STATUS: String = "IN_PROGRESS"
+
+/** 重排后的首个优先级与步长（与 homework 的 HomeworkConstants 口径一致） */
+private const val MIN_PRIORITY = 0
+private const val PRIORITY_STEP = 1
+
+/** [HomeworkItemDao.moveToPositionInTransaction] 的结果（不改动数据的分支同样以此回报） */
+enum class MovePositionOutcome {
+
+    /** 重排成功（含目标位置与当前位置相同、或已在目标位置的幂等场景） */
+    SUCCESS,
+
+    /** 作业不存在（可能已被删除） */
+    NOT_FOUND,
+
+    /** 作业已进入「进行中」：拒绝重排且不改动任何数据 */
+    LOCKED,
 }

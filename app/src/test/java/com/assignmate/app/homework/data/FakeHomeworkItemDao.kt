@@ -1,6 +1,7 @@
 package com.assignmate.app.homework.data
 
 import com.assignmate.app.core.data.db.dao.HomeworkItemDao
+import com.assignmate.app.core.data.db.dao.MovePositionOutcome
 import com.assignmate.app.core.data.db.entity.HomeworkItemEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +19,31 @@ class FakeHomeworkItemDao : HomeworkItemDao {
 
     /** Room 的 Flow 查询在数据变更后重新发射：以 StateFlow 模拟同一行为 */
     private val revision = MutableStateFlow(0)
+
+    /**
+     * 测试专用：在「进入事务」的瞬间执行的并发变更钩子（一次性）。
+     *
+     * 真实 Room 的 @Transaction 默认方法由单事务实现，事务内重读能看到并发写入的最新状态；
+     * 单线程测试无法制造真实并发，因此用本钩子把变更注入到「事务内重读之前」，
+     * 从而可确定性地验证事务内复查（如进行中锁定）能拦下已失效的重排。执行后自动清空。
+     */
+    var onNextTransactionEnter: ((MutableList<HomeworkItemEntity>) -> Unit)? = null
+
+    /**
+     * 复刻 [HomeworkItemDao.moveToPositionInTransaction] 的事务内语义：
+     * 先执行并发钩子（若有），再重读状态与清单，命中锁定则不改动任何数据。
+     */
+    override suspend fun moveToPositionInTransaction(
+        homeworkId: Long,
+        targetIndex: Int,
+    ): MovePositionOutcome {
+        onNextTransactionEnter?.let { hook ->
+            hook(rows)
+            onNextTransactionEnter = null
+            revision.value += 1
+        }
+        return super.moveToPositionInTransaction(homeworkId, targetIndex)
+    }
 
     override suspend fun insert(item: HomeworkItemEntity): Long {
         val id = nextId++

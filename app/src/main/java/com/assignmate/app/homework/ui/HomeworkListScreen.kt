@@ -41,11 +41,16 @@ import java.time.ZoneId
 
 /**
  * 作业清单页：按优先级升序展示作业（内容/类型/开始时间/预估时长/状态标签，当天与阶段可区分），
- * 提供上移下移调整优先级、进入编辑与时间设定、标记完成/撤销完成、删除确认；
+ * 提供「开始作业」、上移下移调整优先级、进入编辑与时间设定、标记完成/撤销完成、删除确认；
  * 操作按钮按两个权限维度分别展示（见 [HomeworkRowUiState]）：
- * 编辑/删除/调序用改删权（学生仅自己录入项），设时间/标记完成/撤销完成用执行权
+ * 编辑/删除/调序用改删权（学生仅自己录入项），开始作业/设时间/标记完成/撤销完成用执行权
  * （学生可操作本人名下全部作业，含家长布置的，保证「家长布置 → 学生计时完成」闭环可用）；
+ * 进行中锁定（需求假设 C）：状态为「进行中」的作业隐藏调序与时间入口，仅保留完成/撤销完成。
  * 顶部「添加作业」进入录入入口页（四方式：手动 / 拍照 / 相册 / 语音）。
+ *
+ * [onStartHomework] 即「开始作业」的导航意图（默认空实现保持兼容），
+ * 由 framework 计划接到计时页；[onHomeworkRemoved] 为删除成功后的收尾通知
+ * （默认空实现，由 framework 接到「取消该作业的到点提醒」）；本模块不依赖 timer。
  */
 @Composable
 fun HomeworkListRoute(
@@ -54,6 +59,14 @@ fun HomeworkListRoute(
     onAddHomework: () -> Unit,
     onEditTime: (Long) -> Unit,
     onEditTemplate: (Long) -> Unit,
+    onStartHomework: (homeworkId: Long) -> Unit = {},
+    /**
+     * 「作业已删除」的收尾通知（仅删除成功后调用一次）：由 framework 接到
+     * 「取消该作业的到点提醒」，避免旧闹钟触发指向已删除作业的提醒。
+     *
+     * 默认空实现：未接线时删除流程与既有行为完全一致（homework 不依赖 timer）。
+     */
+    onHomeworkRemoved: (homeworkId: Long) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: HomeworkListViewModel = hiltViewModel(),
 ) {
@@ -66,6 +79,9 @@ fun HomeworkListRoute(
                 is HomeworkListEvent.ShowMessage -> {
                     snackbarHostState.showSnackbar(event.message, duration = SnackbarDuration.Long)
                 }
+
+                // 删除成功：先外抛收尾通知（framework 取消该作业的到点提醒），再展示提示
+                is HomeworkListEvent.Deleted -> onHomeworkRemoved(event.homeworkId)
             }
         }
     }
@@ -74,11 +90,13 @@ fun HomeworkListRoute(
         onAddHomework = onAddHomework,
         onEditTime = onEditTime,
         onEditTemplate = onEditTemplate,
+        onStartHomework = onStartHomework,
         onMoveUp = viewModel::onMoveUpClick,
         onMoveDown = viewModel::onMoveDownClick,
         onDeleteClick = viewModel::onDeleteClick,
         onDeleteConfirm = viewModel::onDeleteConfirm,
         onDeleteDismiss = viewModel::onDeleteDismiss,
+        onStart = viewModel::onStartHomeworkClick,
         onComplete = viewModel::onCompleteClick,
         onReopen = viewModel::onReopenClick,
     )
@@ -96,7 +114,7 @@ fun HomeworkListRoute(
     }
 }
 
-/** 清单页回调集合（避免内容函数参数过长） */
+/** 清单页回调集合（避免内容函数参数过长；默认实现项置于末尾，保留向下兼容） */
 class HomeworkListCallbacks(
     val onBack: () -> Unit,
     val onAddHomework: () -> Unit,
@@ -109,6 +127,13 @@ class HomeworkListCallbacks(
     val onDeleteDismiss: () -> Unit,
     val onComplete: (Long) -> Unit,
     val onReopen: (Long) -> Unit,
+    /**
+     * 「开始作业」导航意图：由 framework 接到计时页；默认空实现，未接线时点击不导航。
+     * 状态推进（→ 进行中）由 [onStart] 落库，保证清单状态即时正确。
+     */
+    val onStartHomework: (homeworkId: Long) -> Unit = {},
+    /** 「开始作业」：把作业推进为「进行中」（执行权校验 + 仓库兜底） */
+    val onStart: (Long) -> Unit = {},
 )
 
 /** 清单页内容（无状态，便于预览与测试） */
@@ -211,14 +236,17 @@ fun HomeworkRow(
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(
-                    onClick = { callbacks.onMoveUp(item.id) },
-                    enabled = row.canMoveUp,
-                ) { Text(text = "↑") }
-                TextButton(
-                    onClick = { callbacks.onMoveDown(item.id) },
-                    enabled = row.canMoveDown,
-                ) { Text(text = "↓") }
+                // 进行中锁定：隐藏调序入口（需求假设 C），避免点击后才发现被拒
+                if (!row.lockedWorkInProgress) {
+                    TextButton(
+                        onClick = { callbacks.onMoveUp(item.id) },
+                        enabled = row.canMoveUp,
+                    ) { Text(text = "↑") }
+                    TextButton(
+                        onClick = { callbacks.onMoveDown(item.id) },
+                        enabled = row.canMoveDown,
+                    ) { Text(text = "↓") }
+                }
             }
             Spacer(modifier = Modifier.height(2.dp))
             Text(
@@ -257,13 +285,34 @@ fun HomeworkRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+                // 开始作业：执行权——待完成（及进行中）的本人名下作业；
+                // 先落库推进为「进行中」，再以回调外抛导航意图（framework 接到计时页）
+                if (row.canStart) {
+                    TextButton(
+                        onClick = {
+                            callbacks.onStart(item.id)
+                            callbacks.onStartHomework(item.id)
+                        },
+                    ) {
+                        Text(
+                            text = if (item.status == HomeworkStatus.IN_PROGRESS) {
+                                "继续计时"
+                            } else {
+                                "开始作业"
+                            },
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
                 // 编辑（内容/类型）：改删权——学生仅自己录入的作业
                 if (row.canModify) {
                     TextButton(onClick = { callbacks.onEditTemplate(item.id) }) {
                         Text(text = "编辑", style = MaterialTheme.typography.labelLarge)
                     }
                 }
-                // 时间排定：执行权——学生可为自己名下（含家长布置的）作业排定时间
+                // 时间排定：执行权——学生可为自己名下（含家长布置的）作业排定时间；
+                // 进行中锁定后不再展示（需求假设 C）
                 if (row.canSchedule) {
                     TextButton(onClick = { callbacks.onEditTime(item.id) }) {
                         Text(
@@ -293,8 +342,16 @@ fun HomeworkRow(
                         )
                     }
                 }
-                if (!row.canModify && !row.canSchedule && !row.canComplete &&
-                    !row.canReopen && !row.canDelete
+                if (row.lockedWorkInProgress) {
+                    // 进行中锁定提示：调序与时间均不可调整
+                    Text(
+                        text = WORK_IN_PROGRESS_LOCKED_HINT,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (!row.canModify && !row.canSchedule && !row.canStart &&
+                    !row.canComplete && !row.canReopen && !row.canDelete
                 ) {
                     Text(
                         text = EXECUTE_PERMISSION_DENIED_HINT,

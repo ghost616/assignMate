@@ -21,6 +21,11 @@ import kotlinx.coroutines.flow.Flow
  *   失败返回机器可读原因供 UI 提示；
  * - 状态流转：录入时为「已记录」；markPending / startProgress / complete / reopen
  *   仅允许 HomeworkStatus 定义的合法流转，非法流转返回 [HomeworkStatusResult.IllegalTransition]；
+ * - 进行中锁定：作业进入「进行中」后不得再调整优先级与时间排定
+ *   （reorderHomework / moveHomeworkTo / updateSchedule / clearSchedule 一律拒绝，
+ *   分别返回 [HomeworkOrderResult.LockedWorkInProgress] / [ScheduleUpdateResult.LockedWorkInProgress] /
+ *   [HomeworkOperationResult.LockedWorkInProgress]，均不抛异常，且不改动任何数据）；
+ *   内容修改、类型修改与删除不受该锁定约束（沿用各自权限维度）；
  * - 所有方法不抛业务异常，成败统一收敛为密封结果（reason 枚举机器可读，用户文案由 UI 层映射）。
  */
 interface HomeworkRepository {
@@ -49,14 +54,20 @@ interface HomeworkRepository {
 
     // ---- 优先级 ----
 
-    /** 上移/下移一位（与相邻项交换优先级）；已在边界时为幂等成功 */
+    /**
+     * 上移/下移一位（与相邻项交换优先级）；已在边界时为幂等成功。
+     *
+     * 进行中锁定：状态为「进行中」的作业不允许再调整优先级（返回
+     * [HomeworkOrderResult.LockedWorkInProgress]），避免与计时链路已确认的执行顺序冲突；
+     * 「已完成」保持既有约束（可调序，仅改删权受限）。
+     */
     suspend fun reorderHomework(
         homeworkId: Long,
         direction: ReorderDirection,
         sessionRole: Role,
     ): HomeworkOrderResult
 
-    /** 落位到指定位置（0 起，越界自动收敛），其余项顺延并整体重排优先级 */
+    /** 落位到指定位置（0 起，越界自动收敛），其余项顺延并整体重排优先级；进行中同样被锁定（见 [reorderHomework]） */
     suspend fun moveHomeworkTo(
         homeworkId: Long,
         targetIndex: Int,
@@ -71,7 +82,10 @@ interface HomeworkRepository {
      *
      * 权限（执行权，见 HomeworkValidators.canOperate）：家长可排定名下学生全部作业；
      * 学生可排定**本人名下**全部作业（含家长布置的），否则「家长布置 → 学生计时完成」主闭环不可用。
-     * 已完成作业不可再排定（返回 ScheduleUpdateResult.StatusTransitionDenied，保留历史排定），
+     *
+     * 进行中锁定：状态为「进行中」的作业不允许再调整时间（返回
+     * [ScheduleUpdateResult.LockedWorkInProgress]），保留计时开始时刻这一历史事实；
+     * 已完成作业同样不可再排定（返回 [ScheduleUpdateResult.StatusTransitionDenied]），
      * 如需重新排定请先撤销完成（clearSchedule 会把已完成回退为进行中）。
      */
     suspend fun updateSchedule(
@@ -84,6 +98,10 @@ interface HomeworkRepository {
     /**
      * 撤销时间排定（开始时间与预估时长置空）：待完成回退为「已记录」，
      * 已完成回退为「进行中」（保证撤销后仍可重新排定，不留死局）；权限同 updateSchedule。
+     *
+     * 进行中锁定：状态为「进行中」的作业不允许撤销排定（返回
+     * [HomeworkOperationResult.LockedWorkInProgress]）——排定时间段是计时与防冲突校验的依据，
+     * 进行中撤销会破坏计时链路口径；如需撤销请先标记完成（或按家长/学生各自权限撤销完成）。
      */
     suspend fun clearSchedule(homeworkId: Long, sessionRole: Role): HomeworkOperationResult
 
@@ -166,6 +184,12 @@ sealed class HomeworkOrderResult {
 
     /** 权限不足（学生尝试调整家长录入项的优先级） */
     data object PermissionDenied : HomeworkOrderResult()
+
+    /**
+     * 作业已进入「进行中」：按进行中锁定规则拒绝调整优先级（不改动任何数据），
+     * 与权限无关，故单独成一个可读原因供 UI 精确提示。
+     */
+    data object LockedWorkInProgress : HomeworkOrderResult()
 }
 
 /** 时间排定结果 */
@@ -194,6 +218,12 @@ sealed class ScheduleUpdateResult {
 
     /** 状态流转不合法（如已完成作业不允许再排定时间） */
     data object StatusTransitionDenied : ScheduleUpdateResult()
+
+    /**
+     * 作业已进入「进行中」：按进行中锁定规则拒绝重新排定时间（保留原排定），
+     * 与「已完成」的 [StatusTransitionDenied] 区分，便于 UI 给出「已开始，无法改时间」的精确提示。
+     */
+    data object LockedWorkInProgress : ScheduleUpdateResult()
 }
 
 /** 通用作业操作结果（内容修改 / 类型修改 / 删除 / 撤销排定） */
@@ -213,6 +243,12 @@ sealed class HomeworkOperationResult {
 
     /** 内容不合法（空白或超长） */
     data class ContentInvalid(val error: HomeworkValidationError) : HomeworkOperationResult()
+
+    /**
+     * 作业已进入「进行中」：按进行中锁定规则拒绝该操作（当前用于撤销时间排定），
+     * 与权限无关，单独成因供 UI 精确提示。
+     */
+    data object LockedWorkInProgress : HomeworkOperationResult()
 }
 
 /** 状态流转结果 */

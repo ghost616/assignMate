@@ -14,7 +14,11 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- 前台服务：专注计时走秒 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- 前台服务类型权限（Android 14 / API 34 起：声明 foregroundServiceType 必须同时申请对应类型权限） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- 唤醒锁：计时期间保持通知走秒（不申请忽略电池优化） -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 震动：作业到点提醒（无通知权限时仍以震动提示） -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- 相机非必需：无相机设备也可安装（OCR 非唯一录入方式） -->
@@ -53,6 +57,24 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- 计时走秒前台服务：退到后台/锁屏时计时持续，常驻通知展示当前作业与已用时。
+             specialUse 类型对应「用户主动发起的专注计时」这类无对口系统类型的场景，
+             需配合 FOREGROUND_SERVICE_SPECIAL_USE 权限与 subtype 属性（Android 14 起强制要求） -->
+        <service
+            android:name=".timer.service.TimerTickerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="作业专注计时走秒：用户主动开始计时后保持计时与状态通知" />
+        </service>
+
+        <!-- 作业到点提醒广播接收器：仅由应用内的 AlarmManager 闹钟显式触发，
+             exported=false 保证外部应用无法伪造提醒广播 -->
+        <receiver
+            android:name=".timer.service.HomeworkAlarmReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

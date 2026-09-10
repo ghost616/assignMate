@@ -31,11 +31,20 @@ import com.assignmate.app.core.ui.components.AssignMateBigButton
 import com.assignmate.app.core.ui.components.CoreEmptyPlaceholder
 import com.assignmate.app.core.ui.components.CoreLoadingPlaceholder
 import com.assignmate.app.homework.domain.HomeworkConstants
+import com.assignmate.app.homework.domain.HomeworkItem
 import java.time.ZoneId
 
 /**
  * 时间设定 / 编辑页：填写开始日期与时刻、预估时长，提交后展示 deadline 超限与时段冲突提示。
  * 提交前本地校验 deadline 约束，时段冲突由仓库查库兜底（返回可读原因）。
+ *
+ * 不可编辑的两种情形均**就地渲染**（不只依赖一次性 Snackbar）：
+ * - 无执行权（学生排定他人名下作业）→ 展示作业概要 + EXECUTE_PERMISSION_DENIED_HINT；
+ * - 进行中锁定（作业已开始）→ 展示作业概要 + WORK_IN_PROGRESS_LOCKED_HINT 并隐藏表单。
+ * 两种情况都在读作业后保留 item，避免深链进入时渲染成残缺空表单。
+ *
+ * [onHomeworkScheduleSaved] 为排定成功后的收尾通知（默认空实现），由 framework 接到
+ * 「按新时刻同步该作业的到点提醒」；本模块不依赖 timer。
  */
 @Composable
 fun HomeworkTimeSetRoute(
@@ -43,6 +52,13 @@ fun HomeworkTimeSetRoute(
     homeworkId: Long,
     onBack: () -> Unit,
     onSaved: () -> Unit,
+    /**
+     * 「时间已保存」的收尾通知（仅排定成功后调用一次）：由 framework 接到
+     * 「按新时刻同步该作业的到点提醒」，避免旧时刻闹钟仍生效、新时刻无闹钟。
+     *
+     * 默认空实现：未接线时保存流程与既有行为完全一致（homework 不依赖 timer）。
+     */
+    onHomeworkScheduleSaved: (homeworkId: Long) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: HomeworkTimeSetViewModel = hiltViewModel(),
 ) {
@@ -55,6 +71,8 @@ fun HomeworkTimeSetRoute(
         viewModel.events.collect { event ->
             when (event) {
                 is TimeSetEvent.Saved -> {
+                    // 排定成功：先外抛收尾通知（framework 按新时刻同步到点提醒），再提示并返回
+                    onHomeworkScheduleSaved(event.homeworkId)
                     snackbarHostState.showSnackbar(event.message, duration = SnackbarDuration.Long)
                     onSaved()
                 }
@@ -118,34 +136,30 @@ fun HomeworkTimeSetContent(
         Spacer(modifier = Modifier.height(12.dp))
         when {
             uiState.loading -> CoreLoadingPlaceholder(text = "正在读取作业…")
-            uiState.missingSession -> CoreEmptyPlaceholder(text = "无法编辑该作业（会话失效或无权限）")
+            uiState.missingSession -> CoreEmptyPlaceholder(text = "无法编辑该作业（会话失效或作业不存在）")
+            // 无执行权：保留作业概要 + 就地提示，避免渲染成残缺空表单
+            uiState.permissionDenied -> {
+                HomeworkSummaryCard(item = uiState.item, zoneId = zoneId)
+                Spacer(modifier = Modifier.height(12.dp))
+                CoreEmptyPlaceholder(text = EXECUTE_PERMISSION_DENIED_HINT)
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+            // 进行中锁定：就地提示（不只依赖一次性 Snackbar），隐藏表单
+            uiState.lockedWorkInProgress -> {
+                HomeworkSummaryCard(item = uiState.item, zoneId = zoneId)
+                Spacer(modifier = Modifier.height(12.dp))
+                CoreEmptyPlaceholder(text = WORK_IN_PROGRESS_LOCKED_HINT)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "作业已开始计时，如需重新安排时间请先在作业清单中完成或纠正状态。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+
             else -> {
-                val item = uiState.item
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = item?.content?.ifBlank { "（待补充内容）" } ?: "-",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "类型：${item?.typeLabel() ?: "-"}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        if (item?.deadline != null) {
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "截止：${
-                                    TimeFormatters.formatDateTime(item.deadline.toEpochMilli(), zoneId)
-                                }",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.error,
-                            )
-                        }
-                    }
-                }
+                HomeworkSummaryCard(item = uiState.item, zoneId = zoneId)
                 Spacer(modifier = Modifier.height(12.dp))
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
@@ -202,6 +216,39 @@ fun HomeworkTimeSetContent(
                     }
                 }
                 Spacer(modifier = Modifier.height(24.dp))
+            }
+        }
+    }
+}
+
+/**
+ * 作业概要卡片（内容 + 类型与阶段 + 截止时间）。
+ *
+ * 抽为独立 composable 供「正常表单」「无执行权」「进行中锁定」三个分支复用：
+ * 锁定/无权限分支同样展示概要，避免深链进入时渲染成「（待补充内容）/ 类型：-」的残缺空表单。
+ */
+@Composable
+private fun HomeworkSummaryCard(item: HomeworkItem?, zoneId: ZoneId) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = item?.content?.ifBlank { "（待补充内容）" } ?: "-",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "类型：${item?.typeLabel() ?: "-"}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (item?.deadline != null) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "截止：${TimeFormatters.formatDateTime(item.deadline.toEpochMilli(), zoneId)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
         }
     }

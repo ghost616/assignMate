@@ -75,7 +75,10 @@ private const val MILLIS_PER_MINUTE = 60_000L
  * 覆盖四类业务规则：
  * 1. deadline 约束：开始时间 + 预估时长不得晚于 deadline；
  * 2. 时间段防冲突：候选时间段与同学生其它已排定作业不重叠（排除自身）；
- * 3. 权限规则：学生仅可修改/删除自己新增项、不可动家长录入项，家长可改删全部；
+ * 3. 权限规则：两个维度刻意分开——
+ *    改删权（[canModify]/[canDelete]）只看录入者角色：学生仅可改删自己新增项，家长可改删全部；
+ *    调序权（[canReorder]）在改删权之上补「作业归属学生」校验（学生仅可调序本人名下、自己录入的作业）；
+ *    执行权（[canOperate]）只看作业归属：时间排定与状态流转面向作业的执行者，与录入者角色无关；
  * 4. 状态流转合法性：见 [HomeworkStatus.allowedTransitions]。
  *
  * 所有方法均为纯函数：不读时钟、不访问数据库，时间来源由调用方（仓库/ViewModel）注入。
@@ -158,8 +161,24 @@ object HomeworkValidators {
     /** 删除权限与修改权限同源（家长全部可删，学生仅可删自己录入的） */
     fun canDelete(item: HomeworkItem, sessionRole: Role): Boolean = canModify(item, sessionRole)
 
-    /** 是否可调整优先级：与修改权限同源（学生不可调整家长录入项的优先级） */
-    fun canReorder(item: HomeworkItem, sessionRole: Role): Boolean = canModify(item, sessionRole)
+    /**
+     * 是否可调整优先级：在改删权（[canModify]，学生不可调家长录入项）之上再补「作业归属学生」维度。
+     *
+     * 归属维度的必要性：改删权只比对录入者角色，故「学生录入但归属另一个学生」的作业会被误判为可调序，
+     * 形成跨学生越权面（同一作业在时间维度 [canOperate] 已返回拒绝，两个口径必须一致）。
+     * - 家长：可调序名下（仓库层经 canTargetStudent 圈定）学生的全部作业；
+     * - 学生：必须同时满足「自己录入」与「本人名下」（[HomeworkItem.studentId] == [sessionStudentId]），
+     *   会话未携带 studentId 时一律拒绝。
+     */
+    fun canReorder(
+        item: HomeworkItem,
+        sessionRole: Role,
+        sessionStudentId: Long?,
+    ): Boolean = when (sessionRole) {
+        Role.PARENT -> canModify(item, sessionRole)
+        Role.STUDENT -> canModify(item, sessionRole) &&
+            sessionStudentId != null && item.studentId == sessionStudentId
+    }
 
     // ---- 3.1 执行权（时间排定与状态流转） ----
 

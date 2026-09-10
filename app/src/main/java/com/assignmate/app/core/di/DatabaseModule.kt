@@ -8,7 +8,9 @@ import com.assignmate.app.core.data.db.AppDatabase
 import com.assignmate.app.core.data.db.dao.HomeworkItemDao
 import com.assignmate.app.core.data.db.dao.OcrRetryTaskDao
 import com.assignmate.app.core.data.db.dao.ParentAccountDao
+import com.assignmate.app.core.data.db.dao.PauseRecordDao
 import com.assignmate.app.core.data.db.dao.StudentDao
+import com.assignmate.app.core.data.db.dao.TimerSessionDao
 import com.assignmate.app.core.domain.util.CoreConstants
 import dagger.Module
 import dagger.Provides
@@ -109,6 +111,58 @@ object DatabaseModule {
         }
     }
 
+    /** v3 -> v4：新增计时执行会话表 timer_session 与暂停明细表 pause_record（含外键与查询索引）。 */
+    val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `timer_session` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`homework_id` INTEGER NOT NULL, " +
+                    "`student_id` INTEGER NOT NULL, " +
+                    "`parent_account_id` INTEGER NOT NULL, " +
+                    "`started_at` INTEGER NOT NULL, " +
+                    "`finished_at` INTEGER, " +
+                    "`paused_total_millis` INTEGER NOT NULL DEFAULT 0, " +
+                    "`pause_count` INTEGER NOT NULL DEFAULT 0, " +
+                    "`status` TEXT NOT NULL, " +
+                    "FOREIGN KEY(`homework_id`) REFERENCES `homework_item`(`id`) " +
+                    "ON UPDATE NO ACTION ON DELETE CASCADE " +
+                    ")",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_timer_session_homework_id` " +
+                    "ON `timer_session` (`homework_id`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_timer_session_student_id` " +
+                    "ON `timer_session` (`student_id`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_timer_session_student_id_status` " +
+                    "ON `timer_session` (`student_id`, `status`)",
+            )
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `pause_record` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`session_id` INTEGER NOT NULL, " +
+                    "`homework_id` INTEGER NOT NULL, " +
+                    "`pause_start_at` INTEGER NOT NULL, " +
+                    "`pause_end_at` INTEGER, " +
+                    "FOREIGN KEY(`session_id`) REFERENCES `timer_session`(`id`) " +
+                    "ON UPDATE NO ACTION ON DELETE CASCADE " +
+                    ")",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_pause_record_session_id` " +
+                    "ON `pause_record` (`session_id`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_pause_record_homework_id` " +
+                    "ON `pause_record` (`homework_id`)",
+            )
+        }
+    }
+
     @Provides
     @Singleton
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
@@ -116,7 +170,7 @@ object DatabaseModule {
             context,
             AppDatabase::class.java,
             CoreConstants.DATABASE_NAME,
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
 
     @Provides
     fun provideOcrRetryTaskDao(database: AppDatabase): OcrRetryTaskDao = database.ocrRetryTaskDao()
@@ -129,4 +183,10 @@ object DatabaseModule {
 
     @Provides
     fun provideHomeworkItemDao(database: AppDatabase): HomeworkItemDao = database.homeworkItemDao()
+
+    @Provides
+    fun provideTimerSessionDao(database: AppDatabase): TimerSessionDao = database.timerSessionDao()
+
+    @Provides
+    fun providePauseRecordDao(database: AppDatabase): PauseRecordDao = database.pauseRecordDao()
 }

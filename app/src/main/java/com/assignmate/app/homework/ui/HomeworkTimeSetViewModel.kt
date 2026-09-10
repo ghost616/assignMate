@@ -9,6 +9,7 @@ import com.assignmate.app.homework.data.HomeworkRepository
 import com.assignmate.app.homework.data.ScheduleUpdateResult
 import com.assignmate.app.homework.domain.HomeworkConstants
 import com.assignmate.app.homework.domain.HomeworkItem
+import com.assignmate.app.homework.domain.HomeworkStatus
 import com.assignmate.app.homework.domain.HomeworkValidation
 import com.assignmate.app.homework.domain.HomeworkValidators
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -67,10 +68,18 @@ class HomeworkTimeSetViewModel @Inject constructor(
                 sendMessage("作业不存在，可能已被删除")
                 return@launch
             }
-            // 执行权（与仓库同源）：学生可为自己名下（含家长布置的）作业排定时间
+            // 执行权（与仓库同源）：学生可为自己名下（含家长布置的）作业排定时间。
+            // 读出 item 后即写入状态，保证无权限/锁定分支也能渲染作业概要，不出现「残缺空表单」
             if (!HomeworkValidators.canOperate(item, role, session.studentId)) {
-                _uiState.update { it.copy(loading = false, missingSession = true) }
+                _uiState.update { it.copy(loading = false, item = item, permissionDenied = true) }
                 sendMessage(EXECUTE_PERMISSION_DENIED_HINT)
+                return@launch
+            }
+            // 进行中锁定（需求假设 C）：已开始的作业不得再调整时间；此处兜底防止直接深链进入绕过清单页禁用。
+            // 同样保留 item，页面据此渲染就地锁定提示（不再依赖转瞬即逝的 Snackbar）
+            if (item.status == HomeworkStatus.IN_PROGRESS) {
+                _uiState.update { it.copy(loading = false, item = item, lockedWorkInProgress = true) }
+                sendMessage(WORK_IN_PROGRESS_LOCKED_HINT)
                 return@launch
             }
             val today = LocalDate.ofEpochDay(HomeworkValidators.epochDayOf(clock.currentTimeMillis(), zoneId))
@@ -111,7 +120,15 @@ class HomeworkTimeSetViewModel @Inject constructor(
 
     fun onSubmit() {
         val state = _uiState.value
-        if (state.loading || state.submitting || state.missingSession) {
+        if (state.loading || state.submitting) {
+            return
+        }
+        if (state.lockedWorkInProgress) {
+            // 进行中锁定：与仓库同源的兜底提示（页面已渲染就地锁定提示，正常不会触达）
+            sendMessage(WORK_IN_PROGRESS_LOCKED_HINT)
+            return
+        }
+        if (!state.editable) {
             return
         }
         val item = state.item ?: return
@@ -151,8 +168,11 @@ class HomeworkTimeSetViewModel @Inject constructor(
             )
             _uiState.update { it.copy(submitting = false) }
             when (result) {
-                is ScheduleUpdateResult.Success ->
-                    _events.send(TimeSetEvent.Saved(result.toUserMessage()))
+                is ScheduleUpdateResult.Success -> {
+                    // 事件同时携带 homeworkId：framework 据此按新时刻同步到点提醒，
+                    // 避免旧时刻闹钟仍生效、新时刻无闹钟（失败静默，不影响保存主流程）
+                    _events.send(TimeSetEvent.Saved(homeworkId = item.id, message = result.toUserMessage()))
+                }
 
                 ScheduleUpdateResult.DeadlineExceeded ->
                     _uiState.update { it.copy(timeError = result.toUserMessage()) }
@@ -200,7 +220,16 @@ class HomeworkTimeSetViewModel @Inject constructor(
 data class HomeworkTimeSetUiState(
     val initialized: Boolean = false,
     val loading: Boolean = true,
+    /** 会话失效（无角色）或目标作业不存在：页面整体不可编辑 */
     val missingSession: Boolean = false,
+    /** 执行权不足（学生尝试排定他人名下作业）：保留已读到的 [item] 供页面展示概要并给出就地提示 */
+    val permissionDenied: Boolean = false,
+    /**
+     * 进行中锁定：作业已开始，不再允许调整时间。
+     * 页面据此渲染**就地锁定提示**（隐藏表单），不只依赖一次性 Snackbar；
+     * [item] 同样保留，避免深链进入时渲染成残缺空表单。
+     */
+    val lockedWorkInProgress: Boolean = false,
     val submitting: Boolean = false,
     val studentId: Long? = null,
     val role: Role? = null,
@@ -213,15 +242,22 @@ data class HomeworkTimeSetUiState(
     val minutesError: String? = null,
 ) {
 
-    /** 提交按钮可用条件 */
-    val canSubmit: Boolean get() = !loading && !submitting && !missingSession
+    /** 表单是否可编辑：会话有效、有执行权且未被进行中锁定 */
+    val editable: Boolean
+        get() = !loading && !missingSession && !permissionDenied && !lockedWorkInProgress
+
+    /** 提交按钮可用条件（不可编辑时一律不可提交） */
+    val canSubmit: Boolean get() = editable && !submitting
 }
 
 /** 时间设定页一次性事件 */
 sealed interface TimeSetEvent {
 
-    /** 排定成功：携带提示文案后返回上一页 */
-    data class Saved(val message: String) : TimeSetEvent
+    /**
+     * 排定成功：携带提示文案后返回上一页；[homeworkId] 供 framework 按新时刻同步到点提醒
+     * （事件不含任何 timer 类型，homework 模块因此不依赖 timer）。
+     */
+    data class Saved(val homeworkId: Long, val message: String) : TimeSetEvent
 
     /** 一次性提示（不关闭页面） */
     data class ShowMessage(val message: String) : TimeSetEvent

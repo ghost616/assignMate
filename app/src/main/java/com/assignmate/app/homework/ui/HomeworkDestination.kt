@@ -6,7 +6,8 @@ package com.assignmate.app.homework.ui
  *
  * 路由清单与接线契约：
  * - LIST：作业清单页，`homework/list/{studentId}`；[HomeworkListRoute] 的 `onBack/onAddHomework/
- *   onEditTime/onEditTemplate` 回调即导航意图；
+ *   onEditTime/onEditTemplate/onStartHomework` 回调即导航意图
+ *   （`onStartHomework(homeworkId)` 为「开始作业」意图，待接计时页；默认空实现，未接线不影响清单功能）；
  * - ENTRY：录入入口页（手动录入 + 四方式入口框架，OCR/语音由下一计划落地），
  *   `homework/entry/{studentId}`；
  * - TEMPLATE：录入/编辑模板页，`homework/template/{studentId}?homeworkId={id}`；

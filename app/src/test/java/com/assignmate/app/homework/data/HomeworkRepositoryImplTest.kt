@@ -270,6 +270,160 @@ class HomeworkRepositoryImplTest {
         )
     }
 
+    // ---- 进行中锁定（需求假设 C）：已开始 / 已完成的作业不允许调整优先级与时间 ----
+
+    @Test
+    fun `进行中作业调序被拦截且顺序与时间保持不变`() = runTest {
+        val env = HomeworkTestEnv()
+        val parentId = env.loginAsParent()
+        val studentId = env.addStudent(parentId)
+        env.addTodayHomework(studentId, "A")
+        env.advance(1_000)
+        val second = (env.addTodayHomework(studentId, "B") as AddHomeworkResult.Success).items.single()
+        val start = Instant.ofEpochMilli(millisAt(16))
+        env.repository.updateSchedule(second.id, start, 30, Role.PARENT)
+        env.repository.startProgress(second.id, Role.PARENT)
+
+        assertEquals(
+            HomeworkOrderResult.LockedWorkInProgress,
+            env.repository.reorderHomework(second.id, ReorderDirection.UP, Role.PARENT),
+        )
+        assertEquals(
+            HomeworkOrderResult.LockedWorkInProgress,
+            env.repository.moveHomeworkTo(second.id, 0, Role.PARENT),
+        )
+        // 被拒后顺序与优先级、排定时间均保持原样
+        val ordered = env.repository.listHomework(studentId)
+        assertEquals(listOf("A", "B"), ordered.map { it.content })
+        assertEquals(listOf(0, 1), ordered.map { it.priority })
+        assertEquals(HomeworkStatus.IN_PROGRESS, ordered[1].status)
+        assertEquals(start, ordered[1].startTime)
+        assertEquals(30, ordered[1].estimatedMinutes)
+    }
+
+    @Test
+    fun `进行中作业不可重新排定时间也不可撤销排定`() = runTest {
+        val env = HomeworkTestEnv()
+        val parentId = env.loginAsParent()
+        val studentId = env.addStudent(parentId)
+        val item = (env.addTodayHomework(studentId, "语文练习") as AddHomeworkResult.Success).items.single()
+        val start = Instant.ofEpochMilli(millisAt(16))
+        env.repository.updateSchedule(item.id, start, 30, Role.PARENT)
+        env.repository.startProgress(item.id, Role.PARENT)
+
+        assertEquals(
+            ScheduleUpdateResult.LockedWorkInProgress,
+            env.repository.updateSchedule(item.id, Instant.ofEpochMilli(millisAt(17)), 45, Role.PARENT),
+        )
+        assertEquals(
+            HomeworkOperationResult.LockedWorkInProgress,
+            env.repository.clearSchedule(item.id, Role.PARENT),
+        )
+        // 原排定与状态均未被改动（未留下「半撤销」的中间态）
+        val current = env.repository.getHomework(item.id)!!
+        assertEquals(HomeworkStatus.IN_PROGRESS, current.status)
+        assertEquals(start, current.startTime)
+        assertEquals(30, current.estimatedMinutes)
+    }
+
+    @Test
+    fun `学生对自己录入的进行中作业同样受锁定约束`() = runTest {
+        val env = HomeworkTestEnv()
+        val parentId = env.loginAsParent()
+        val studentId = env.addStudent(parentId)
+        env.loginAsStudent(parentId, studentId)
+        val item = (
+            env.addTodayHomework(studentId, "自己记的作业", createdBy = CreatorRole.STUDENT)
+                as AddHomeworkResult.Success
+            ).items.single()
+        env.repository.updateSchedule(item.id, Instant.ofEpochMilli(millisAt(16)), 30, Role.STUDENT)
+        env.repository.startProgress(item.id, Role.STUDENT)
+
+        // 改删/调序权本可通过（学生自己录入项），但进行中锁定使其同样被拒
+        assertEquals(
+            ScheduleUpdateResult.LockedWorkInProgress,
+            env.repository.updateSchedule(item.id, Instant.ofEpochMilli(millisAt(17)), 30, Role.STUDENT),
+        )
+        assertEquals(
+            HomeworkOperationResult.LockedWorkInProgress,
+            env.repository.clearSchedule(item.id, Role.STUDENT),
+        )
+        assertEquals(
+            HomeworkOrderResult.LockedWorkInProgress,
+            env.repository.reorderHomework(item.id, ReorderDirection.UP, Role.STUDENT),
+        )
+    }
+
+    @Test
+    fun `待完成作业仍可正常调序排定与撤销排定`() = runTest {
+        val env = HomeworkTestEnv()
+        val parentId = env.loginAsParent()
+        val studentId = env.addStudent(parentId)
+        val first = (env.addTodayHomework(studentId, "A") as AddHomeworkResult.Success).items.single()
+        env.advance(1_000)
+        val second = (env.addTodayHomework(studentId, "B") as AddHomeworkResult.Success).items.single()
+        // 排定后即进入「待完成」（未开始计时，不触发进行中锁定）
+        env.repository.updateSchedule(second.id, Instant.ofEpochMilli(millisAt(16)), 30, Role.PARENT)
+
+        // 调序仍可用
+        assertEquals(
+            HomeworkOrderResult.Success,
+            env.repository.reorderHomework(second.id, ReorderDirection.UP, Role.PARENT),
+        )
+        assertEquals(listOf("B", "A"), env.repository.listHomework(studentId).map { it.content })
+
+        // 改时间仍可用（同上一条作业自身排定不冲突）
+        val rescheduled = env.repository.updateSchedule(
+            second.id,
+            Instant.ofEpochMilli(millisAt(17)),
+            45,
+            Role.PARENT,
+        )
+        assertTrue(rescheduled is ScheduleUpdateResult.Success)
+        assertEquals(
+            HomeworkStatus.PENDING,
+            (rescheduled as ScheduleUpdateResult.Success).item.status,
+        )
+
+        // 撤销排定仍可用：待完成回退为已记录
+        val cleared = env.repository.clearSchedule(second.id, Role.PARENT)
+        assertTrue(cleared is HomeworkOperationResult.Success)
+        assertEquals(
+            HomeworkStatus.RECORDED,
+            (cleared as HomeworkOperationResult.Success).item.status,
+        )
+        assertEquals("A", env.repository.getHomework(first.id)?.content)
+    }
+
+    @Test
+    fun `已完成作业仍可调序但不可排定时间`() = runTest {
+        val env = HomeworkTestEnv()
+        val parentId = env.loginAsParent()
+        val studentId = env.addStudent(parentId)
+        val first = (env.addTodayHomework(studentId, "A") as AddHomeworkResult.Success).items.single()
+        env.advance(1_000)
+        val second = (env.addTodayHomework(studentId, "B") as AddHomeworkResult.Success).items.single()
+        env.repository.markPending(second.id, Role.PARENT)
+        env.repository.complete(second.id, Role.PARENT)
+
+        // 已完成的既有约束保持不变：可调序（仅受改删权限制），但不可再排定时间
+        assertEquals(
+            HomeworkOrderResult.Success,
+            env.repository.reorderHomework(second.id, ReorderDirection.UP, Role.PARENT),
+        )
+        assertEquals(listOf("B", "A"), env.repository.listHomework(studentId).map { it.content })
+        assertEquals(
+            ScheduleUpdateResult.StatusTransitionDenied,
+            env.repository.updateSchedule(
+                second.id,
+                Instant.ofEpochMilli(millisAt(18)),
+                30,
+                Role.PARENT,
+            ),
+        )
+        assertEquals("A", env.repository.getHomework(first.id)?.content)
+    }
+
     // ---- 时间设定：deadline 约束与时段冲突拦截 ----
 
     @Test
@@ -725,7 +879,7 @@ class HomeworkRepositoryImplTest {
     }
 
     @Test
-    fun `已完成作业撤销时间排定后回退为进行中并可重新排定`() = runTest {
+    fun `已完成作业撤销时间排定后回退为进行中并落入锁定`() = runTest {
         val env = HomeworkTestEnv()
         val parentId = env.loginAsParent()
         val studentId = env.addStudent(parentId)
@@ -739,25 +893,43 @@ class HomeworkRepositoryImplTest {
             env.repository.updateSchedule(item.id, Instant.ofEpochMilli(millisAt(17)), 30, Role.PARENT),
         )
 
-        // 撤销排定后状态回退为进行中，从而可以重新排定（不留死局）
+        // 撤销排定后状态回退为进行中（不再留「永远无法再排定」的死局），
+        // 但进行中按锁定规则同样不可再改时间：重新排定前须先显式纠正状态（如完成后再处理）
         val cleared = env.repository.clearSchedule(item.id, Role.PARENT)
         assertTrue(cleared is HomeworkOperationResult.Success)
         assertEquals(
             HomeworkStatus.IN_PROGRESS,
             (cleared as HomeworkOperationResult.Success).item.status,
         )
+        assertNull(cleared.item.startTime)
 
-        val rescheduled = env.repository.updateSchedule(
-            item.id,
-            Instant.ofEpochMilli(millisAt(17)),
-            30,
-            Role.PARENT,
+        assertEquals(
+            ScheduleUpdateResult.LockedWorkInProgress,
+            env.repository.updateSchedule(item.id, Instant.ofEpochMilli(millisAt(17)), 30, Role.PARENT),
         )
-        assertTrue(rescheduled is ScheduleUpdateResult.Success)
+    }
+
+    @Test
+    fun `撤销完成后的进行中作业不再允许改时间`() = runTest {
+        val env = HomeworkTestEnv()
+        val parentId = env.loginAsParent()
+        val studentId = env.addStudent(parentId)
+        val item = (env.addTodayHomework(studentId, "数学练习") as AddHomeworkResult.Success).items.single()
+        val start = Instant.ofEpochMilli(millisAt(16))
+        env.repository.updateSchedule(item.id, start, 30, Role.PARENT)
+        env.repository.startProgress(item.id, Role.PARENT)
+        env.repository.complete(item.id, Role.PARENT)
+
+        val reopened = env.repository.reopen(item.id, Role.PARENT)
         assertEquals(
             HomeworkStatus.IN_PROGRESS,
-            (rescheduled as ScheduleUpdateResult.Success).item.status,
+            (reopened as HomeworkStatusResult.Success).item.status,
         )
+        assertEquals(
+            ScheduleUpdateResult.LockedWorkInProgress,
+            env.repository.updateSchedule(item.id, Instant.ofEpochMilli(millisAt(17)), 30, Role.PARENT),
+        )
+        assertEquals(start, env.repository.getHomework(item.id)?.startTime)
     }
 
     @Test

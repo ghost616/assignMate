@@ -4,6 +4,7 @@ import com.assignmate.app.auth.data.AuthRepository
 import com.assignmate.app.auth.domain.Role
 import com.assignmate.app.auth.domain.SessionState
 import com.assignmate.app.core.data.db.dao.HomeworkItemDao
+import com.assignmate.app.core.data.db.dao.MovePositionOutcome
 import com.assignmate.app.core.data.db.entity.HomeworkItemEntity
 import com.assignmate.app.core.domain.time.Clock
 import com.assignmate.app.homework.domain.CreatorRole
@@ -32,10 +33,14 @@ import kotlinx.coroutines.flow.map
  * - 写入的家长归属 id 取自 auth 当前会话（parentId），学生 id 由调用方指定并校验会话有效；
  * - 权限分两个维度（[HomeworkValidators]）：
  *   1) 改删/调序（[canModify]/[canDelete]/[canReorder]）：学生仅可操作自己录入项，家长可操作全部；
+ *      其中调序额外要求「本人名下」（学生不可调序他人名下、即使该作业由学生录入）；
  *      类型/阶段范围/截止时间（[updateTemplate]）为家长专属，学生会话直接拒绝；
  *   2) 执行权（[canOperate]）：时间排定与状态流转面向「作业的执行者」，
  *      学生可操作本人名下全部作业（含家长布置的），家长可操作名下学生全部作业；
  * - 时间：排定前先过 deadline 约束与同学生时间段防冲突（排除自身），失败返回可读原因；
+ * - 进行中锁定：状态为 [HomeworkStatus.IN_PROGRESS] 的作业不得再调整优先级与时间排定
+ *   （[reorderHomework]/[moveHomeworkTo]/[updateSchedule]/[clearSchedule] 一律拒绝，
+ *   返回 LockedWorkInProgress 类结果且不改动数据）；「已完成」保持既有约束；
  * - 状态：新增为「已记录」；排定成功推进到「待完成」；其余流转按 [HomeworkStatus] 合法性校验；
  * - 时间来源统一取 [Clock]，便于测试注入固定时钟。
  */
@@ -98,8 +103,12 @@ class HomeworkRepositoryImpl @Inject constructor(
         sessionRole: Role,
     ): HomeworkOrderResult {
         val item = homeworkItemDao.findById(homeworkId) ?: return HomeworkOrderResult.NotFound
-        if (!HomeworkValidators.canReorder(item.toDomain(), sessionRole)) {
+        if (!HomeworkValidators.canReorder(item.toDomain(), sessionRole, currentStudentId())) {
             return HomeworkOrderResult.PermissionDenied
+        }
+        if (isWorkInProgress(item.status)) {
+            // 进行中锁定：优先级已在计时链路中被确认，禁止再调整（不改动数据）
+            return HomeworkOrderResult.LockedWorkInProgress
         }
         val ordered = homeworkItemDao.loadByStudent(item.studentId)
         val index = ordered.indexOfFirst { it.id == homeworkId }
@@ -124,26 +133,21 @@ class HomeworkRepositoryImpl @Inject constructor(
         sessionRole: Role,
     ): HomeworkOrderResult {
         val item = homeworkItemDao.findById(homeworkId) ?: return HomeworkOrderResult.NotFound
-        if (!HomeworkValidators.canReorder(item.toDomain(), sessionRole)) {
+        if (!HomeworkValidators.canReorder(item.toDomain(), sessionRole, currentStudentId())) {
             return HomeworkOrderResult.PermissionDenied
         }
-        val ordered = homeworkItemDao.loadByStudent(item.studentId)
-        val from = ordered.indexOfFirst { it.id == homeworkId }
-        if (from < 0) {
-            return HomeworkOrderResult.NotFound
+        if (isWorkInProgress(item.status)) {
+            // 进行中锁定：落位调整同样被拒绝（与 reorderHomework 同源）
+            return HomeworkOrderResult.LockedWorkInProgress
         }
-        val to = targetIndex.coerceIn(0, ordered.lastIndex)
-        if (from == to) {
-            return HomeworkOrderResult.Success
+        // 落位需要「先读全清单 → 校验 → 批量写优先级」三段原子完成：
+        // 统一交给 DAO 的 @Transaction 方法（事务内重读并在写入前复查进行中锁定），
+        // 避免读与写之间作业被并发置为进行中后仍完成一次已失效的重排。
+        return when (homeworkItemDao.moveToPositionInTransaction(homeworkId, targetIndex)) {
+            MovePositionOutcome.SUCCESS -> HomeworkOrderResult.Success
+            MovePositionOutcome.NOT_FOUND -> HomeworkOrderResult.NotFound
+            MovePositionOutcome.LOCKED -> HomeworkOrderResult.LockedWorkInProgress
         }
-        val reordered = ordered.toMutableList().apply { add(to, removeAt(from)) }
-        reordered.forEachIndexed { index, entity ->
-            val expected = HomeworkConstants.MIN_PRIORITY + index * HomeworkConstants.PRIORITY_STEP
-            if (entity.priority != expected) {
-                homeworkItemDao.update(entity.copy(priority = expected))
-            }
-        }
-        return HomeworkOrderResult.Success
     }
 
     // ---- 时间排定 ----
@@ -159,6 +163,10 @@ class HomeworkRepositoryImpl @Inject constructor(
         // 执行权：学生可为本人名下（含家长布置的）作业排定时间
         if (!canOperate(domain, sessionRole)) {
             return ScheduleUpdateResult.PermissionDenied
+        }
+        // 进行中锁定：开始时刻是计时链路的既有事实，进行中不得再改时间（保留原排定）
+        if (domain.status == HomeworkStatus.IN_PROGRESS) {
+            return ScheduleUpdateResult.LockedWorkInProgress
         }
         if (HomeworkValidators.validateEstimatedMinutes(estimatedMinutes) is HomeworkValidation.Invalid) {
             return ScheduleUpdateResult.InvalidEstimatedMinutes
@@ -206,6 +214,10 @@ class HomeworkRepositoryImpl @Inject constructor(
         // 执行权：学生可撤销本人名下作业的时间排定
         if (!canOperate(domain, sessionRole)) {
             return HomeworkOperationResult.PermissionDenied
+        }
+        // 进行中锁定：排定时间段是计时与防冲突校验的依据，进行中不允许撤销
+        if (domain.status == HomeworkStatus.IN_PROGRESS) {
+            return HomeworkOperationResult.LockedWorkInProgress
         }
         // 已完成的作业排在清除后允许重新排定：状态回退为进行中（与 undoBlockedScheduling 语义一致）
         val nextStatus = when (domain.status) {
@@ -351,8 +363,11 @@ class HomeworkRepositoryImpl @Inject constructor(
         HomeworkValidators.canOperate(
             item = domain,
             sessionRole = sessionRole,
-            sessionStudentId = authRepository.currentSession().studentId,
+            sessionStudentId = currentStudentId(),
         )
+
+    /** 当前会话的学生 id（家长会话为 null）：调序归属校验与执行权判定共用同一口径 */
+    private suspend fun currentStudentId(): Long? = authRepository.currentSession().studentId
 
     /** 目标学生是否属于当前会话可见范围：学生会话仅限本人，家长会话仅限本人名下学生 */
     private suspend fun canTargetStudent(session: SessionState, studentId: Long): Boolean =
@@ -367,6 +382,14 @@ class HomeworkRepositoryImpl @Inject constructor(
     /** 作业的归属日（epochDay）：阶段作业展开日已在写入时固化，此处以创建时刻所在日为准做范围校验 */
     private fun startEpochDayOf(domain: HomeworkItem): Long =
         HomeworkValidators.epochDayOf(domain.createdAt.toEpochMilli(), zoneId)
+
+    /**
+     * 进行中锁定判定（需求假设 C）：状态为「进行中」的作业不允许调整优先级与时间排定。
+     * 以库中持久化状态列（name 字符串）为准，脏值不崩溃。
+     */
+    private fun isWorkInProgress(rawStatus: String): Boolean =
+        HomeworkStatus.fromName(rawStatus) == HomeworkStatus.IN_PROGRESS
+
     /** 交换两条作业项的优先级（上移/下移的基本操作） */
     private suspend fun swapPriority(first: HomeworkItemEntity, second: HomeworkItemEntity) {
         homeworkItemDao.update(first.copy(priority = second.priority))

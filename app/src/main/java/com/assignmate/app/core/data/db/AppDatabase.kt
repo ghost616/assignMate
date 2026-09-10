@@ -6,11 +6,15 @@ import androidx.room.TypeConverters
 import com.assignmate.app.core.data.db.dao.HomeworkItemDao
 import com.assignmate.app.core.data.db.dao.OcrRetryTaskDao
 import com.assignmate.app.core.data.db.dao.ParentAccountDao
+import com.assignmate.app.core.data.db.dao.PauseRecordDao
 import com.assignmate.app.core.data.db.dao.StudentDao
+import com.assignmate.app.core.data.db.dao.TimerSessionDao
 import com.assignmate.app.core.data.db.entity.HomeworkItemEntity
 import com.assignmate.app.core.data.db.entity.OcrRetryTaskEntity
 import com.assignmate.app.core.data.db.entity.ParentAccountEntity
+import com.assignmate.app.core.data.db.entity.PauseRecordEntity
 import com.assignmate.app.core.data.db.entity.StudentEntity
+import com.assignmate.app.core.data.db.entity.TimerSessionEntity
 import com.assignmate.app.core.domain.util.CoreConstants
 
 /**
@@ -30,6 +34,8 @@ import com.assignmate.app.core.domain.util.CoreConstants
         ParentAccountEntity::class,
         StudentEntity::class,
         HomeworkItemEntity::class,
+        TimerSessionEntity::class,
+        PauseRecordEntity::class,
     ],
     version = CoreConstants.DATABASE_VERSION,
     exportSchema = true,
@@ -48,4 +54,10 @@ abstract class AppDatabase : RoomDatabase() {
 
     /** 作业项 DAO（homework 模块使用） */
     abstract fun homeworkItemDao(): HomeworkItemDao
+
+    /** 计时会话 DAO（timer 模块使用） */
+    abstract fun timerSessionDao(): TimerSessionDao
+
+    /** 暂停明细 DAO（timer/stats 模块使用） */
+    abstract fun pauseRecordDao(): PauseRecordDao
 }

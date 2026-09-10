@@ -199,9 +199,33 @@ class HomeworkValidatorsTest {
 
         assertFalse(HomeworkValidators.canModify(parentItem, Role.STUDENT))
         assertFalse(HomeworkValidators.canDelete(parentItem, Role.STUDENT))
-        assertFalse(HomeworkValidators.canReorder(parentItem, Role.STUDENT))
+        assertFalse(HomeworkValidators.canReorder(parentItem, Role.STUDENT, sessionStudentId = 10L))
         assertTrue(HomeworkValidators.canModify(ownItem, Role.STUDENT))
         assertTrue(HomeworkValidators.canDelete(ownItem, Role.STUDENT))
+    }
+
+    @Test
+    fun `调序权在改删权之上补作业归属维度`() {
+        // 作业归属学生 10；会话学生 99 时，即使作业由学生录入也不可调序（跨学生越权面）
+        val ownRecorded = item(createdByRole = CreatorRole.STUDENT)
+        val parentRecorded = item(id = 2L, createdByRole = CreatorRole.PARENT)
+
+        assertTrue(HomeworkValidators.canReorder(ownRecorded, Role.STUDENT, sessionStudentId = 10L))
+        assertFalse(
+            "家长录入项即使在自己名下也不可调序（改删权维度仍然生效）",
+            HomeworkValidators.canReorder(parentRecorded, Role.STUDENT, sessionStudentId = 10L),
+        )
+        assertFalse(
+            "他人名下的学生录入项不可调序（改删权只看录入者角色，故必须补归属维度）",
+            HomeworkValidators.canReorder(ownRecorded, Role.STUDENT, sessionStudentId = 99L),
+        )
+        assertFalse(
+            "学生会话缺少本人 id 时一律拒绝",
+            HomeworkValidators.canReorder(ownRecorded, Role.STUDENT, sessionStudentId = null),
+        )
+        // 家长不受归属维度影响（家长侧归属范围由仓库 canTargetStudent 圈定）
+        assertTrue(HomeworkValidators.canReorder(ownRecorded, Role.PARENT, sessionStudentId = null))
+        assertTrue(HomeworkValidators.canReorder(parentRecorded, Role.PARENT, sessionStudentId = 99L))
     }
 
     // ---- 3.1 执行权（时间排定与状态流转，与改删权刻意分离） ----

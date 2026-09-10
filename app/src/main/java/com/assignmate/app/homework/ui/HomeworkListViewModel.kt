@@ -6,8 +6,9 @@ import com.assignmate.app.auth.data.AuthRepository
 import com.assignmate.app.auth.domain.Role
 import com.assignmate.app.auth.domain.SessionState
 import com.assignmate.app.core.domain.time.Clock
-import com.assignmate.app.homework.data.HomeworkRepository
 import com.assignmate.app.homework.data.HomeworkOrderResult
+import com.assignmate.app.homework.data.HomeworkOperationResult
+import com.assignmate.app.homework.data.HomeworkRepository
 import com.assignmate.app.homework.data.HomeworkStatusResult
 import com.assignmate.app.homework.data.ReorderDirection
 import com.assignmate.app.homework.domain.HomeworkItem
@@ -36,6 +37,8 @@ import kotlinx.coroutines.launch
  *
  * 状态流转语义（本页负责的入口）：
  * - 「已记录」项可进入时间设定；排定成功后仓库自动推进为「待完成」；
+ * - 「待完成」项可「开始作业」（导航到计时页）与「标记完成」；
+ * - 「进行中」项锁定调序与时间排定（需求假设 C），仅可「标记完成」或继续计时；
  * - 「已完成」项可撤销完成（completed → in_progress），便于纠正误标记。
  *
  * 数据来源：仓库 observeHomework 单数据流（StateFlow 暴露给 UI），
@@ -119,8 +122,10 @@ class HomeworkListViewModel @Inject constructor(
                     _uiState.update { state ->
                         state.copy(
                             items = items.mapIndexed { index, item ->
-                                // 调序用改删权限（学生不可调家长录入项），完成/撤销完成用执行权
-                                val movable = canReorder(state.role, item)
+                                // 调序用改删权 + 归属维度（学生不可调他人名下项）+ 进行中锁定；
+                                // 完成/撤销完成用执行权
+                                val movable = canReorder(state.role, item, state.sessionStudentId) &&
+                                    item.status != HomeworkStatus.IN_PROGRESS
                                 item.toRow(
                                     role = state.role,
                                     sessionStudentId = state.sessionStudentId,
@@ -164,8 +169,13 @@ class HomeworkListViewModel @Inject constructor(
         if (targetIndex !in rows.indices) {
             return
         }
-        if (!canReorder(current.role, rows[index].homework)) {
+        if (!canReorder(current.role, rows[index].homework, current.sessionStudentId)) {
             sendMessage(PERMISSION_DENIED_HINT)
+            return
+        }
+        if (rows[index].lockedWorkInProgress) {
+            // 进行中锁定：与仓库同源兜底（UI 已隐藏/禁用调序入口）
+            sendMessage(WORK_IN_PROGRESS_LOCKED_HINT)
             return
         }
         val swapped = rows.toMutableList().apply {
@@ -175,7 +185,15 @@ class HomeworkListViewModel @Inject constructor(
         _uiState.update { state ->
             state.copy(
                 items = swapped.mapIndexed { i, row ->
-                    row.copy(canMoveUp = i > 0, canMoveDown = i < swapped.lastIndex)
+                    // 重新推导整行（进行中锁定与越权项保持不可调序，避免本地交换绕过守卫）
+                    val movable = canReorder(state.role, row.homework, state.sessionStudentId) &&
+                        !row.lockedWorkInProgress
+                    row.homework.toRow(
+                        role = state.role,
+                        sessionStudentId = state.sessionStudentId,
+                        canMoveUp = i > 0 && movable,
+                        canMoveDown = i < swapped.lastIndex && movable,
+                    )
                 },
             )
         }
@@ -215,10 +233,34 @@ class HomeworkListViewModel @Inject constructor(
             val result = homeworkRepository.deleteHomework(target.id, role)
             _uiState.update { it.copy(deleting = false, deleteTarget = null) }
             sendMessage(result.toUserMessage("已删除该作业"))
+            // 删除成功才外抛收尾事件：framework 据此取消该作业的到点提醒，
+            // 避免作业已删除、旧闹钟仍触发指向不存在作业的提醒（失败静默，不影响主流程）
+            if (result is HomeworkOperationResult.Success) {
+                _events.send(HomeworkListEvent.Deleted(homeworkId = target.id))
+            }
         }
     }
 
-    // ---- 状态流转（本页提供「标记完成」与「撤销完成」） ----
+    // ---- 状态流转（本页提供「开始作业」「标记完成」与「撤销完成」） ----
+
+    /**
+     * 开始作业：把「开始」意图写入「进行中」状态，具体计时由 timer 模块（framework 接线）承接。
+     *
+     * 本页只负责状态推进与可读提示，不依赖 timer 模块；导航意图经
+     * [HomeworkListCallbacks.onStartHomework] 回调外抛，未接线时为空实现。
+     */
+    fun onStartHomeworkClick(homeworkId: Long) {
+        val row = _uiState.value.items.firstOrNull { it.homework.id == homeworkId } ?: return
+        if (!row.canStart) {
+            sendMessage(EXECUTE_PERMISSION_DENIED_HINT)
+            return
+        }
+        val role = _uiState.value.role ?: return
+        viewModelScope.launch {
+            val result = homeworkRepository.startProgress(homeworkId, role)
+            sendMessage(result.toStartMessage())
+        }
+    }
 
     /** 标记完成：待完成/进行中 → 已完成（执行权：本人名下作业） */
     fun onCompleteClick(homeworkId: Long) {
@@ -266,13 +308,21 @@ class HomeworkListViewModel @Inject constructor(
 
     // ---- 私有工具 ----
 
+    /** 「开始作业」结果 → 可读文案（成功提示不关闭页面，计时由 timer 模块承接） */
+    private fun HomeworkStatusResult.toStartMessage(): String = when (this) {
+        is HomeworkStatusResult.Success -> "已开始该作业"
+        HomeworkStatusResult.NotFound -> "作业不存在，可能已被删除"
+        HomeworkStatusResult.PermissionDenied -> EXECUTE_PERMISSION_DENIED_HINT
+        is HomeworkStatusResult.IllegalTransition -> "当前状态不支持开始作业"
+    }
+
     private fun sendMessage(message: String) {
         viewModelScope.launch { _events.send(HomeworkListEvent.ShowMessage(message)) }
     }
 
-    /** 改删/调序权限：学生仅可操作自己录入的作业 */
-    private fun canReorder(role: Role?, item: HomeworkItem): Boolean =
-        role != null && HomeworkValidators.canReorder(item, role)
+    /** 改删/调序权限：学生仅可调序「本人名下且自己录入」的作业（家长全可，归属由仓库按会话圈定） */
+    private fun canReorder(role: Role?, item: HomeworkItem, sessionStudentId: Long?): Boolean =
+        role != null && HomeworkValidators.canReorder(item, role, sessionStudentId)
 
     private fun HomeworkItem.toRow(
         role: Role?,
@@ -318,12 +368,20 @@ data class HomeworkRowUiState(
     /** 改删/调序权限：学生仅可操作自己录入的作业（[HomeworkValidators.canModify]） */
     val canModify: Boolean,
     val canDelete: Boolean,
-    /** 执行权：可进入时间设定（本人名下作业，且未完成） */
+    /** 执行权：可进入时间设定（本人名下作业，且未完成、未锁定进行中） */
     val canSchedule: Boolean,
+    /**
+     * 执行权：可「开始作业 / 继续计时」——
+     * 待完成（PENDING，可执行）或进行中（IN_PROGRESS，继续计时）的本人名下作业；
+     * 已记录（RECORDED）需先排定时间，已完成（COMPLETED）不可再开始，故均不展示该入口。
+     */
+    val canStart: Boolean,
     /** 执行权：可推进状态至完成（本人名下作业，且处于待完成/进行中） */
     val canComplete: Boolean,
     /** 执行权：已完成项可撤销完成（本人名下作业） */
     val canReopen: Boolean,
+    /** 进行中锁定（需求假设 C）：已开始的作业不允许调整优先级与时间，UI 隐藏操作并给出提示 */
+    val lockedWorkInProgress: Boolean,
     val canMoveUp: Boolean,
     val canMoveDown: Boolean,
 )
@@ -336,6 +394,10 @@ data class HomeworkRowUiState(
  * - 时间排定与状态流转用 [HomeworkValidators.canOperate]（学生可为本人名下全部作业，
  *   含家长布置的，保证「家长布置 → 学生排定时间 → 计时完成」主闭环可用）；
  * 「标记完成」仅在待完成/进行中可用（已记录需先排定时间，见 [HomeworkStatus] 流转表）。
+ *
+ * 进行中锁定（[lockedWorkInProgress]）：状态为「进行中」时不允许调序与改时间，
+ * 故 [canSchedule] 为 false、调序按钮同样不可用（调序开关见 [HomeworkRowUiState.canMoveUp]/
+ * [canMoveDown]，由调用方按「列表位置 + 改删权 + 该标记」共同决定）。
  */
 internal fun HomeworkItem.toRowUiState(
     role: Role?,
@@ -344,6 +406,7 @@ internal fun HomeworkItem.toRowUiState(
     canMoveDown: Boolean,
 ): HomeworkRowUiState {
     val executable = role != null && HomeworkValidators.canOperate(this, role, sessionStudentId)
+    val locked = status == HomeworkStatus.IN_PROGRESS
     val unfinished = status != HomeworkStatus.COMPLETED
     val completable = executable &&
         (status == HomeworkStatus.PENDING || status == HomeworkStatus.IN_PROGRESS)
@@ -351,9 +414,11 @@ internal fun HomeworkItem.toRowUiState(
         homework = this,
         canModify = role != null && HomeworkValidators.canModify(this, role),
         canDelete = role != null && HomeworkValidators.canDelete(this, role),
-        canSchedule = unfinished && executable,
+        canSchedule = unfinished && !locked && executable,
+        canStart = executable && (status == HomeworkStatus.PENDING || status == HomeworkStatus.IN_PROGRESS),
         canComplete = completable,
         canReopen = !unfinished && executable,
+        lockedWorkInProgress = locked,
         canMoveUp = canMoveUp,
         canMoveDown = canMoveDown,
     )
@@ -364,4 +429,11 @@ sealed interface HomeworkListEvent {
 
     /** 一次性提示（Snackbar 展示） */
     data class ShowMessage(val message: String) : HomeworkListEvent
+
+    /**
+     * 作业删除成功（仅成功时发出一次）：framework 据此取消该作业的到点提醒。
+     *
+     * 事件只携带 [homeworkId]，不含任何 timer 类型，homework 模块因此不依赖 timer。
+     */
+    data class Deleted(val homeworkId: Long) : HomeworkListEvent
 }

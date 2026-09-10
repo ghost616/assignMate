@@ -14,7 +14,9 @@ import org.junit.Test
  * 清单条目可操作性推导单测（[toRowUiState]，纯函数）：
  * 验证「改删权」与「执行权」两个权限维度在 UI 上的投影——
  * 学生必须能对家长布置的本人作业排定时间/标记完成（主闭环），
- * 又不能触碰他人名下作业；改删/调序仍限自己录入的作业。
+ * 又不能触碰他人名下作业；改删/调序仍限自己录入的作业；
+ * 另外验证进行中锁定（需求假设 C）：进行中作业不可调序/改时间，但可开始计时与标记完成，
+ * 以及「开始作业」入口仅在待完成/进行中展示。
  */
 class HomeworkListRowStateTest {
 
@@ -85,12 +87,65 @@ class HomeworkListRowStateTest {
     }
 
     @Test
-    fun `进行中的本人作业可改时间也可标记完成`() {
+    fun `进行中的本人作业被锁定调序与改时间但可继续计时与标记完成`() {
         val row = item(createdByRole = CreatorRole.PARENT, status = HomeworkStatus.IN_PROGRESS)
             .toRowUiState(role = Role.STUDENT, sessionStudentId = STUDENT_ID, canMoveUp = false, canMoveDown = false)
 
-        assertTrue(row.canSchedule)
+        // 进行中锁定（需求假设 C）：不允许调整优先级与时间
+        assertTrue("进行中项应标记为锁定", row.lockedWorkInProgress)
+        assertFalse("进行中不可改时间", row.canSchedule)
+        assertFalse("进行中不可上移", row.canMoveUp)
+        assertFalse("进行中不可下移", row.canMoveDown)
+        // 仍可继续计时（进入计时页）与标记完成
+        assertTrue("进行中可继续计时", row.canStart)
         assertTrue(row.canComplete)
+        assertFalse(row.canReopen)
+    }
+
+    @Test
+    fun `待完成作业可开始作业`() {
+        val row = item(createdByRole = CreatorRole.PARENT, status = HomeworkStatus.PENDING)
+            .toRowUiState(role = Role.STUDENT, sessionStudentId = STUDENT_ID, canMoveUp = true, canMoveDown = true)
+
+        assertTrue("待完成应可开始作业", row.canStart)
+        assertFalse(row.lockedWorkInProgress)
+        assertTrue("待完成未锁定，仍可改时间", row.canSchedule)
+        assertTrue(row.canMoveUp)
+        assertTrue(row.canMoveDown)
+    }
+
+    @Test
+    fun `已记录作业不展示开始作业入口`() {
+        val row = item(createdByRole = CreatorRole.PARENT, status = HomeworkStatus.RECORDED)
+            .toRowUiState(role = Role.STUDENT, sessionStudentId = STUDENT_ID, canMoveUp = true, canMoveDown = false)
+
+        // 已记录需先排定时间（见 HomeworkStatus 流转表），故不给「开始作业」入口
+        assertFalse(row.canStart)
+        assertTrue(row.canSchedule)
+    }
+
+    @Test
+    fun `已完成作业不可开始作业`() {
+        val row = item(createdByRole = CreatorRole.STUDENT, status = HomeworkStatus.COMPLETED)
+            .toRowUiState(role = Role.STUDENT, sessionStudentId = STUDENT_ID, canMoveUp = false, canMoveDown = false)
+
+        assertFalse(row.canStart)
+        assertFalse(row.lockedWorkInProgress)
+        assertTrue(row.canReopen)
+    }
+
+    @Test
+    fun `进行中作业对家长同样锁定且仍可标记完成`() {
+        val row = item(createdByRole = CreatorRole.STUDENT, status = HomeworkStatus.IN_PROGRESS)
+            .toRowUiState(role = Role.PARENT, sessionStudentId = null, canMoveUp = false, canMoveDown = false)
+
+        assertTrue(row.lockedWorkInProgress)
+        assertFalse(row.canSchedule)
+        assertTrue(row.canStart)
+        assertTrue(row.canComplete)
+        // 锁定只约束调序与时间，编辑/删除仍走改删权限
+        assertTrue(row.canModify)
+        assertTrue(row.canDelete)
     }
 
     // ---- 家长视角 ----
