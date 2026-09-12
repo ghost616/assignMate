@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -39,6 +40,9 @@ import com.assignmate.app.homework.domain.HomeworkItem
 import com.assignmate.app.homework.domain.HomeworkStatus
 import java.time.ZoneId
 
+/** 顶部并排大按钮的宽度：与「添加作业」按钮同高（56dp），避免占满整宽挤掉返回入口 */
+private val INLINE_BIG_BUTTON_WIDTH = 160.dp
+
 /**
  * 作业清单页：按优先级升序展示作业（内容/类型/开始时间/预估时长/状态标签，当天与阶段可区分），
  * 提供「开始作业」、上移下移调整优先级、进入编辑与时间设定、标记完成/撤销完成、删除确认；
@@ -51,6 +55,9 @@ import java.time.ZoneId
  * [onStartHomework] 即「开始作业」的导航意图（默认空实现保持兼容），
  * 由 framework 计划接到计时页；[onHomeworkRemoved] 为删除成功后的收尾通知
  * （默认空实现，由 framework 接到「取消该作业的到点提醒」）；本模块不依赖 timer。
+ *
+ * 顶部「查看盘点」入口同样只以回调 [onOpenStats] 暴露导航意图（默认空实现），
+ * 不引入 stats 模块依赖，接线由 framework 计划完成。
  */
 @Composable
 fun HomeworkListRoute(
@@ -60,6 +67,13 @@ fun HomeworkListRoute(
     onEditTime: (Long) -> Unit,
     onEditTemplate: (Long) -> Unit,
     onStartHomework: (homeworkId: Long) -> Unit = {},
+    /**
+     * 「查看盘点」导航意图（家长与学生均可进入）：携带清单当前展示的学生 id，
+     * 由 framework 计划接到盘点页；本模块不依赖 stats。
+     *
+     * 默认空实现：未接线时点击无副作用，清单页既有行为完全不变。
+     */
+    onOpenStats: (studentId: Long) -> Unit = {},
     /**
      * 「作业已删除」的收尾通知（仅删除成功后调用一次）：由 framework 接到
      * 「取消该作业的到点提醒」，避免旧闹钟触发指向已删除作业的提醒。
@@ -91,6 +105,7 @@ fun HomeworkListRoute(
         onEditTime = onEditTime,
         onEditTemplate = onEditTemplate,
         onStartHomework = onStartHomework,
+        onOpenStats = onOpenStats,
         onMoveUp = viewModel::onMoveUpClick,
         onMoveDown = viewModel::onMoveDownClick,
         onDeleteClick = viewModel::onDeleteClick,
@@ -132,6 +147,11 @@ class HomeworkListCallbacks(
      * 状态推进（→ 进行中）由 [onStart] 落库，保证清单状态即时正确。
      */
     val onStartHomework: (homeworkId: Long) -> Unit = {},
+    /**
+     * 「查看盘点」导航意图：由 framework 接到盘点页；默认空实现，未接线时点击不导航。
+     * 参数为目标学生 id（家长为学生本人的 id，学生为本人 id），家长与学生均可进入。
+     */
+    val onOpenStats: (studentId: Long) -> Unit = {},
     /** 「开始作业」：把作业推进为「进行中」（执行权校验 + 仓库兜底） */
     val onStart: (Long) -> Unit = {},
 )
@@ -146,8 +166,21 @@ fun HomeworkListContent(
 ) {
     Column(modifier = modifier.padding(horizontal = 20.dp)) {
         Spacer(modifier = Modifier.height(12.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
             TextButton(onClick = callbacks.onBack) { Text(text = "返回") }
+            // 「查看盘点」：家长与学生均可进入；盘点对象为清单当前展示的学生，
+            // 故仅在目标学生已确定时可用（加载中/未选学生/会话失效时禁用）
+            AssignMateBigButton(
+                text = "查看盘点",
+                onClick = { uiState.statsStudentId?.let(callbacks.onOpenStats) },
+                modifier = Modifier.width(INLINE_BIG_BUTTON_WIDTH),
+                enabled = uiState.statsStudentId != null,
+                containerColor = MaterialTheme.colorScheme.secondary,
+            )
         }
         Text(
             text = "作业清单",

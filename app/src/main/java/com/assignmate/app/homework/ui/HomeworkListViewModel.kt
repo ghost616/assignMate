@@ -360,6 +360,14 @@ data class HomeworkListUiState(
 
     /** 是否为空清单（非加载、非会话/学生缺失且无数据） */
     val isEmpty: Boolean get() = !loading && !missingSession && !missingStudent && items.isEmpty()
+
+    /**
+     * 「查看盘点」入口的目标学生 id：清单当前展示的学生（学生本人 / 家长选定的孩子）。
+     *
+     * 为 null（加载中、会话失效、家长未选定学生）时顶部入口置灰不可点——
+     * 盘点必须绑定到具体学生，故不在这里另行兜底推断。
+     */
+    val statsStudentId: Long? get() = studentId.takeIf { !missingSession && !missingStudent }
 }
 
 /** 清单条目状态：作业数据 + 按角色计算的权限开关 */

@@ -2,6 +2,7 @@ package com.assignmate.app.navigation
 
 import com.assignmate.app.auth.ui.AuthDestination
 import com.assignmate.app.homework.ui.HomeworkDestination
+import com.assignmate.app.stats.ui.StatsDestination
 import com.assignmate.app.timer.ui.TimerDestination
 import java.io.File
 import org.junit.Assert.assertEquals
@@ -66,6 +67,15 @@ class AssignMateNavHostContractTest {
         authRoutes.forEach { route ->
             assertTrue("未注册 auth 路由 $route：$registered", registered.contains(route))
         }
+    }
+
+    @Test
+    fun `stats 三条路由模板均在 NavHost 中被注册`() {
+        val registered = registeredRoutes()
+
+        assertTrue("未注册 DAY_SUMMARY：$registered", registered.contains(StatsDestination.DAY_SUMMARY))
+        assertTrue("未注册 ITEM_DETAIL：$registered", registered.contains(StatsDestination.ITEM_DETAIL))
+        assertTrue("未注册 HISTORY：$registered", registered.contains(StatsDestination.HISTORY))
     }
 
     @Test
@@ -180,6 +190,10 @@ class AssignMateNavHostContractTest {
             "toTimerRest",
             "toTimerNextItem",
             "toTimerCompletion",
+            "toStatsDaySummary",
+            "toStatsItemDetail",
+            "toStatsHistory",
+            "toStatsHistoryRange",
         )
 
         helpers.forEach { helper ->
@@ -323,6 +337,238 @@ class AssignMateNavHostContractTest {
         assertEquals(TimerDestination.ARG_HOMEWORK_ID_NONE, TimerDestination.homeworkIdOf("99999999999999999999"))
     }
 
+    // ---- 6. stats 统计链路接线（清单 → 盘点 → 单项详情 / 历史查询） ----
+
+    @Test
+    fun `清单页「查看盘点」已接线到 stats 当日盘点页`() {
+        val listBlock = blockForRoute(HomeworkDestination.LIST)
+        assertNotNull("未找到作业清单路由注册块", listBlock)
+        assertTrue(
+            "清单页应把 onOpenStats 接到 stats 当日盘点页",
+            listBlock!!.contains("onOpenStats = { statsStudentId -> navController.toStatsDaySummary(statsStudentId) }"),
+        )
+
+        val daySummary = blockForHelper("toStatsDaySummary")!!
+        assertTrue(
+            "toStatsDaySummary 应进入 StatsDestination.daySummaryRoute 并携带日期",
+            daySummary.contains("navigate(StatsDestination.daySummaryRoute(studentId, epochDay))"),
+        )
+        assertTrue(
+            "toStatsDaySummary 应声明 epochDay 缺省为「今天」哨兵（清单入口即盘点今天）",
+            daySummary.contains("epochDay: Long = StatsDestination.ARG_EPOCH_DAY_TODAY"),
+        )
+        assertTrue(
+            "toStatsDaySummary 应声明 fromHistory 入口开关（清单/历史两个入口返回栈语义不同）",
+            daySummary.contains("fromHistory: Boolean = false"),
+        )
+        assertTrue(
+            "toStatsDaySummary 清单入口应 popUpTo(DAY_SUMMARY, inclusive) 替换旧盘点实例（旧实例参数固定，复用会显示旧日期）",
+            daySummary.contains("popUpTo(StatsDestination.DAY_SUMMARY) { inclusive = true }"),
+        )
+        assertTrue(
+            "清单入口（fromHistory = false）才按 DAY_SUMMARY inclusive 弹栈",
+            daySummary.contains("if (!fromHistory)"),
+        )
+    }
+
+    @Test
+    fun `历史入口查看某日盘点应保留历史页并可返回历史页`() {
+        val historyBlock = blockForRoute(StatsDestination.HISTORY)
+        assertNotNull("未找到历史查询路由注册块", historyBlock)
+        // 断言拆成「回调形参完整接收 epochDay」+「按所选日期进入盘点页」两段，避免依赖源码缩进
+        assertTrue(
+            "历史页「查看这一天的盘点」回调应接收 studentId 与 epochDay 两个入参（不再丢弃日期）",
+            historyBlock!!.contains("onOpenDaySummary = { studentId, epochDay ->"),
+        )
+        assertTrue(
+            "历史页应把所选 epochDay 透传给盘点页导航",
+            historyBlock.contains("navController.toStatsDaySummary("),
+        )
+        assertTrue(
+            "历史入口应显式传 fromHistory = true（区别于清单入口）",
+            historyBlock.contains("fromHistory = true"),
+        )
+
+        val daySummary = blockForHelper("toStatsDaySummary")!!
+        assertTrue(
+            "历史入口应只清理历史页之上的旧盘点实例（不连同历史页一起弹出，返回键才能回到历史页）",
+            daySummary.contains("removeDaySummaryInstances()"),
+        )
+        assertTrue(
+            "盘点实例判定应按注册路由模板精确匹配 DAY_SUMMARY",
+            navHostSource.contains("entry.destination.route == StatsDestination.DAY_SUMMARY"),
+        )
+    }
+
+    @Test
+    fun `从历史页进入的盘点实例清理不越过历史页`() {
+        val cleaner = blockForHelper("removeDaySummaryInstances")!!
+        val history = definitionOf("isStatsHistory")
+        val daySummary = definitionOf("isStatsDaySummary")
+
+        assertTrue(
+            "清理应自栈顶逐个弹出（inclusive = true），遇非盘点页即停",
+            cleaner.contains("currentBackStackEntry") &&
+                cleaner.contains("popBackStack(top.destination.id, inclusive = true)"),
+        )
+        assertTrue(
+            "遇历史查询页应停止（不弹出历史页，保留其日期范围上下文）",
+            cleaner.contains("if (isStatsHistory(top)) return"),
+        )
+        assertTrue(
+            "只清理盘点实例（非盘点页即停，兜底防弹穿返回栈）",
+            cleaner.contains("if (!isStatsDaySummary(top)) return"),
+        )
+        assertTrue(
+            "历史页判定应按注册路由模板精确匹配 HISTORY",
+            history.contains("entry.destination.route == StatsDestination.HISTORY"),
+        )
+        assertTrue(
+            "盘点页判定应按注册路由模板精确匹配 DAY_SUMMARY",
+            daySummary.contains("entry.destination.route == StatsDestination.DAY_SUMMARY"),
+        )
+        assertFalse(
+            "历史入口不应使用按 DAY_SUMMARY inclusive 的 popUpTo（会连带移除历史页）",
+            cleaner.contains("popUpTo"),
+        )
+    }
+
+    @Test
+    fun `盘点路由的 epochDay 为可选参数且历史页完整透传所选日期`() {
+        val dayBlock = blockForRoute(StatsDestination.DAY_SUMMARY)
+        assertNotNull("未找到当日盘点路由注册块", dayBlock)
+        assertTrue(
+            "DAY_SUMMARY 应声明 epochDay 查询参数的 navArgument",
+            dayBlock!!.contains("navArgument(StatsDestination.ARG_EPOCH_DAY)"),
+        )
+        assertTrue(
+            "epochDay 的默认值应为「今天」哨兵（可选参数，缺省导航不抛缺少必填参数异常）",
+            dayBlock.contains("defaultValue = StatsDestination.ARG_EPOCH_DAY_TODAY.toString()"),
+        )
+        assertTrue(
+            "盘点页应经 statsEpochDayArg(ARG_EPOCH_DAY) 解析后传给页面",
+            dayBlock.contains("epochDay = entry.statsEpochDayArg(StatsDestination.ARG_EPOCH_DAY)"),
+        )
+
+        val historyBlock = blockForRoute(StatsDestination.HISTORY)
+        assertNotNull("未找到历史查询路由注册块", historyBlock)
+        // 断言拆成「回调形参完整接收 epochDay」+「按所选日期进入盘点页」两段，避免依赖源码缩进
+        assertTrue(
+            "历史页「查看这一天的盘点」回调应接收 studentId 与 epochDay 两个入参（不再丢弃日期）",
+            historyBlock!!.contains("onOpenDaySummary = { studentId, epochDay ->"),
+        )
+        assertTrue(
+            "历史页应把所选 epochDay 透传给盘点页导航（同时标记 fromHistory 以保留本历史页）",
+            historyBlock.contains("navController.toStatsDaySummary(") &&
+                historyBlock.contains("fromHistory = true"),
+        )
+    }
+
+    @Test
+    fun `盘点页可进入单项详情与历史查询`() {
+        val dayBlock = blockForRoute(StatsDestination.DAY_SUMMARY)
+        assertNotNull("未找到当日盘点路由注册块", dayBlock)
+        assertTrue(
+            "盘点页 onOpenItemDetail 应接到单项详情页",
+            dayBlock!!.contains("navController.toStatsItemDetail(studentId, homeworkId)"),
+        )
+        assertTrue(
+            "盘点页 onOpenHistory 应接到历史查询页",
+            dayBlock.contains("onOpenHistory = { studentId -> navController.toStatsHistory(studentId) }"),
+        )
+
+        val itemDetail = blockForHelper("toStatsItemDetail")!!
+        assertTrue(
+            "toStatsItemDetail 应进入 StatsDestination.itemDetailRoute（携带学生与作业）",
+            itemDetail.contains("navigate(StatsDestination.itemDetailRoute(studentId, homeworkId))"),
+        )
+        val history = blockForHelper("toStatsHistory")!!
+        assertTrue(
+            "toStatsHistory 查询范围缺省应传「今天」哨兵（由页面按时区解析）",
+            history.contains("StatsDestination.historyRoute(studentId, StatsDestination.ARG_EPOCH_DAY_TODAY)"),
+        )
+    }
+
+    @Test
+    fun `历史查询换日期范围替换当前实例且选择器归接线层`() {
+        val historyBlock = blockForRoute(StatsDestination.HISTORY)
+        assertNotNull("未找到历史查询路由注册块", historyBlock)
+        assertTrue(
+            "历史页 onPickRange 应弹出日期范围选择器（接线层提供实现）",
+            historyBlock!!.contains("StatsHistoryRangePickerDialog("),
+        )
+        assertTrue(
+            "范围确认后应经 toStatsHistoryRange 重进历史查询页",
+            historyBlock.contains("navController.toStatsHistoryRange("),
+        )
+
+        val rangeHelper = blockForHelper("toStatsHistoryRange")!!
+        assertTrue(
+            "toStatsHistoryRange 应按历史路由模板 popUpTo inclusive 移除旧查询实例",
+            rangeHelper.contains("popUpTo(StatsDestination.HISTORY) { inclusive = true }"),
+        )
+        assertTrue(
+            "toStatsHistoryRange 应压入携带新范围的统计历史路由",
+            rangeHelper.contains("navigate(StatsDestination.historyRoute(studentId, fromEpochDay, toEpochDay))"),
+        )
+
+        // 选择器实现只用 Material3 自带组件（随 Compose BOM 引入，无新增第三方依赖）
+        assertTrue(
+            "日期范围选择器应使用 Material3 自带实现",
+            navHostSource.contains("import androidx.compose.material3.DateRangePicker") &&
+                navHostSource.contains("DateRangePicker(state = state)"),
+        )
+    }
+
+    @Test
+    fun `stats 路由参数经 StatsDestination 解析函数解析`() {
+        assertTrue(
+            "当日盘点/单项详情的学生 id 应经 statsStudentIdArg() 解析",
+            blockForRoute(StatsDestination.DAY_SUMMARY)!!.contains("statsStudentIdArg()") &&
+                blockForRoute(StatsDestination.ITEM_DETAIL)!!.contains("statsStudentIdArg()"),
+        )
+        assertTrue(
+            "单项详情应经 statsHomeworkIdArg() 解析 homeworkId",
+            blockForRoute(StatsDestination.ITEM_DETAIL)!!.contains("statsHomeworkIdArg()"),
+        )
+        assertTrue(
+            "历史查询应经 statsEpochDayArg() 解析起止日期",
+            blockForRoute(StatsDestination.HISTORY)!!.let {
+                it.contains("statsEpochDayArg(StatsDestination.ARG_FROM_EPOCH_DAY)") &&
+                    it.contains("statsEpochDayArg(StatsDestination.ARG_TO_EPOCH_DAY)")
+            },
+        )
+        assertTrue(navHostSource.contains("StatsDestination.studentIdOf"))
+        assertTrue(navHostSource.contains("StatsDestination.homeworkIdOf"))
+        assertTrue(navHostSource.contains("StatsDestination.epochDayOf"))
+    }
+
+    @Test
+    fun `历史查询的日期参数声明默认值使其成为可选参数`() {
+        val historyBlock = blockForRoute(StatsDestination.HISTORY)!!
+        val optionalCount = Regex(
+            "defaultValue = StatsDestination\\.ARG_EPOCH_DAY_TODAY\\.toString\\(\\)",
+        ).findAll(historyBlock).count()
+
+        assertEquals("起止日期两个查询参数都应声明「今天」哨兵默认值", 2, optionalCount)
+    }
+
+    @Test
+    fun `stats 路由参数解析边界与哨兵值口径一致`() {
+        assertEquals(StatsDestination.ARG_STUDENT_ID_NONE, StatsDestination.studentIdOf(null))
+        assertEquals(StatsDestination.ARG_STUDENT_ID_NONE, StatsDestination.studentIdOf("abc"))
+        assertEquals(StatsDestination.ARG_HOMEWORK_ID_NONE, StatsDestination.homeworkIdOf(null))
+        assertEquals(StatsDestination.ARG_EPOCH_DAY_TODAY, StatsDestination.epochDayOf(null))
+        assertEquals(StatsDestination.ARG_EPOCH_DAY_TODAY, StatsDestination.epochDayOf("x"))
+        assertEquals(2L, StatsDestination.studentIdOf("2"))
+        assertEquals(7L, StatsDestination.homeworkIdOf("7"))
+        assertEquals(19_675L, StatsDestination.epochDayOf("19675"))
+        // 路由拼装与解析同源：拼出的路由包含解析函数认识的两个查询参数
+        val route = StatsDestination.historyRoute(2L, 19_674L, 19_675L)
+        assertTrue("历史路由应含起始日查询参数：$route", route.contains("fromEpochDay=19674"))
+        assertTrue("历史路由应含结束日查询参数：$route", route.contains("toEpochDay=19675"))
+    }
+
     // ---- 源码解析工具 ----
 
     /** 读取 NavHost 源码；Gradle 单测工作目录为 app/，同时兼容从仓库根运行。 */
@@ -433,6 +679,26 @@ class AssignMateNavHostContractTest {
             (resolveRouteConstant(route) ?: route) == template
         }
 
+    /**
+     * 取某个私有导航函数的「定义文本」（签名 + 体），同时适用于花括号体与表达式体函数。
+     *
+     * [blockForHelper] 只适用于带花括号体的实现（按 `{` 配平切片，对表达式体函数会错切到后续函数）；
+     * 判定类表达式体函数（如 `isStatsHistory`/`isStatsDaySummary`）走本方法：
+     * 自 `private fun <name>(` 起，到下一个 `private fun` 声明起点或参数列表所在行末尾为止。
+     */
+    private fun definitionOf(name: String): String {
+        val start = Regex("private\\s+fun\\s+" + name + "\\s*\\(").find(navHostSource)
+        assertNotNull("未找到私有导航函数 $name 定义", start)
+        val from = start!!.range.first
+        val nextFun = Regex("private\\s+fun\\s+").find(navHostSource, from + 1)
+        val end = if (nextFun != null) {
+            nextFun.range.first
+        } else {
+            navHostSource.indexOf('\n', navHostSource.indexOf(')', from)).takeIf { it > 0 } ?: navHostSource.length
+        }
+        return navHostSource.substring(from, end)
+    }
+
     /** 取某个私有导航扩展函数的完整定义块（括号配平）。 */
     private fun blockForHelper(name: String): String? {
         val match = Regex("fun\\s+NavHostController\\." + name + "\\s*\\(").find(navHostSource) ?: return null
@@ -470,6 +736,9 @@ class AssignMateNavHostContractTest {
         "TimerDestination.REST" -> TimerDestination.REST
         "TimerDestination.NEXT_ITEM" -> TimerDestination.NEXT_ITEM
         "TimerDestination.COMPLETION" -> TimerDestination.COMPLETION
+        "StatsDestination.DAY_SUMMARY" -> StatsDestination.DAY_SUMMARY
+        "StatsDestination.ITEM_DETAIL" -> StatsDestination.ITEM_DETAIL
+        "StatsDestination.HISTORY" -> StatsDestination.HISTORY
         else -> null
     }
 

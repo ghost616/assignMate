@@ -7,8 +7,10 @@ import com.assignmate.app.auth.ui.AuthDestination
  *
  * 约定：
  * - 宿主/一级路由与导航宿主配置由 framework 定义；
- * - 各业务模块的自有页面路由在各自模块内定义（auth → AuthDestination、homework → HomeworkDestination），
- *   并在 [AssignMateNavHost] 中增量注册，模块间不互相 import UI 实现细节。
+ * - 各业务模块的自有页面路由在各自模块内定义（auth → AuthDestination、homework → HomeworkDestination、
+ *   timer → TimerDestination、stats → StatsDestination），并在 [AssignMateNavHost] 中增量注册，
+ *   路径参数一律由各模块 Destination 的解析函数（`studentIdOf` / `homeworkIdOf` / `epochDayOf`）解析，
+ *   模块间不互相 import UI 实现细节。
  *
  * 首页语义：原占位首页（ui/home/HomeScreen）已删除，由 auth 模块
  * "我是家长 / 我是学生"身份选择入口（[AuthDestination.ROLE_SELECT]）接管；

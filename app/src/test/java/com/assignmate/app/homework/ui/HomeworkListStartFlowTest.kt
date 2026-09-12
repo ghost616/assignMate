@@ -42,6 +42,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -55,6 +56,10 @@ import org.junit.Test
  * 1. 导航回调（[HomeworkListCallbacks.onStartHomework]）可单独构造且默认空实现；
  * 2. 落库推进（[HomeworkListViewModel.onStartHomeworkClick]）确实调用仓库 startProgress 并给出可读提示，
  *    且进行中项与越权项被拦截时不得触达仓库。
+ *
+ * 同一文件亦覆盖顶部「查看盘点」入口的契约：导航回调 [HomeworkListCallbacks.onOpenStats]
+ * 默认空实现（向后兼容）、可注入并透传 studentId，以及入口门控所依赖的
+ * [HomeworkListUiState.statsStudentId]（家长会话取路由学生、学生会话固定本人、未选定学生时为 null）。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class HomeworkListStartFlowTest {
@@ -227,6 +232,266 @@ class HomeworkListStartFlowTest {
         collector.cancel()
     }
 
+    // ---- 顶部「查看盘点」入口 ----
+
+    @Test
+    fun `清单路由回调集合可仅用既有参数构造且查看盘点意图默认空实现`() {
+        val callbacks = HomeworkListCallbacks(
+            onBack = {},
+            onAddHomework = {},
+            onEditTime = {},
+            onEditTemplate = {},
+            onMoveUp = {},
+            onMoveDown = {},
+            onDeleteClick = {},
+            onDeleteConfirm = {},
+            onDeleteDismiss = {},
+            onComplete = {},
+            onReopen = {},
+        )
+
+        // 未接线时点击「查看盘点」不应抛异常（默认空实现）
+        callbacks.onOpenStats(STUDENT_ID)
+    }
+
+    @Test
+    fun `清单路由回调可注入查看盘点导航意图并透传学生 id`() {
+        val navigated = mutableListOf<Long>()
+        val callbacks = HomeworkListCallbacks(
+            onBack = {},
+            onAddHomework = {},
+            onEditTime = {},
+            onEditTemplate = {},
+            onMoveUp = {},
+            onMoveDown = {},
+            onDeleteClick = {},
+            onDeleteConfirm = {},
+            onDeleteDismiss = {},
+            onComplete = {},
+            onReopen = {},
+            onOpenStats = { studentId -> navigated += studentId },
+        )
+
+        callbacks.onOpenStats(OTHER_STUDENT_ID)
+
+        assertEquals(listOf(OTHER_STUDENT_ID), navigated)
+    }
+
+    @Test
+    fun `学生会话查看盘点的目标学生为本人`() = runTest {
+        val repository = FakeHomeworkRepository(emptyList())
+        val viewModel = HomeworkListViewModel(
+            repository,
+            FakeAuthRepository(studentSession()),
+            FixedClock(),
+            zone,
+        )
+
+        viewModel.start(0L)
+        advanceUntilIdle()
+
+        assertEquals(STUDENT_ID, viewModel.uiState.value.statsStudentId)
+    }
+
+    @Test
+    fun `家长会话查看盘点的目标学生为路由参数指定学生`() = runTest {
+        val repository = FakeHomeworkRepository(emptyList())
+        val viewModel = HomeworkListViewModel(
+            repository,
+            FakeAuthRepository(parentSession()),
+            FixedClock(),
+            zone,
+        )
+
+        viewModel.start(OTHER_STUDENT_ID)
+        advanceUntilIdle()
+
+        assertEquals(OTHER_STUDENT_ID, viewModel.uiState.value.statsStudentId)
+    }
+
+    @Test
+    fun `家长未选定学生时查看盘点入口不可用`() = runTest {
+        val repository = FakeHomeworkRepository(emptyList())
+        val viewModel = HomeworkListViewModel(
+            repository,
+            FakeAuthRepository(parentSession()),
+            FixedClock(),
+            zone,
+        )
+
+        viewModel.start(0L)
+        advanceUntilIdle()
+
+        assertTrue("未选定学生时不应暴露盘点目标", viewModel.uiState.value.missingStudent)
+        assertNull(viewModel.uiState.value.statsStudentId)
+    }
+
+    @Test
+    fun `会话失效时查看盘点入口不可用`() = runTest {
+        val repository = FakeHomeworkRepository(emptyList())
+        val viewModel = HomeworkListViewModel(
+            repository,
+            FakeAuthRepository(SessionState.NONE),
+            FixedClock(),
+            zone,
+        )
+
+        viewModel.start(0L)
+        advanceUntilIdle()
+
+        assertNull(viewModel.uiState.value.statsStudentId)
+    }
+
+    // ---- 入口可用性门控（纯状态投影，覆盖 statsStudentId 的全部分支） ----
+
+    @Test
+    fun `加载中且未解析出学生时查看盘点入口不可用`() {
+        // 初始状态：studentId 尚未解析（加载中），入口必须置灰
+        val state = HomeworkListUiState()
+
+        assertTrue("初始应为加载中", state.loading)
+        assertNull("未解析出学生时不得暴露盘点目标", state.statsStudentId)
+    }
+
+    @Test
+    fun `已解析学生且会话与学生均有效时查看盘点入口可用`() {
+        val state = HomeworkListUiState(
+            loading = false,
+            studentId = STUDENT_ID,
+            role = Role.STUDENT,
+            sessionStudentId = STUDENT_ID,
+        )
+
+        assertEquals(STUDENT_ID, state.statsStudentId)
+    }
+
+    @Test
+    fun `家长与会话学生两种角色下盘点入口均不受角色分支影响`() {
+        // 需求：入口不做角色分支，仅受 statsStudentId 门控——两种角色同状态应给出同一结果
+        val asParent = HomeworkListUiState(
+            loading = false,
+            studentId = OTHER_STUDENT_ID,
+            role = Role.PARENT,
+        )
+        val asStudent = HomeworkListUiState(
+            loading = false,
+            studentId = STUDENT_ID,
+            role = Role.STUDENT,
+            sessionStudentId = STUDENT_ID,
+        )
+
+        assertEquals(OTHER_STUDENT_ID, asParent.statsStudentId)
+        assertEquals(STUDENT_ID, asStudent.statsStudentId)
+    }
+
+    @Test
+    fun `会话已失效或家长未选定学生时盘点入口一律不可用`() {
+        // 两类缺失提示分别置位，但都不得暴露盘点目标
+        val sessionLost = HomeworkListUiState(
+            loading = false,
+            missingSession = true,
+            studentId = STUDENT_ID,
+            role = null,
+        )
+        val studentMissing = HomeworkListUiState(
+            loading = false,
+            missingStudent = true,
+            studentId = STUDENT_ID,
+            role = Role.PARENT,
+        )
+
+        assertNull("会话失效时不可用", sessionLost.statsStudentId)
+        assertNull("未选定学生时不可用", studentMissing.statsStudentId)
+    }
+
+    @Test
+    fun `学生角色缺少家长关联时按未选定学生处理且盘点入口不可用`() = runTest {
+        // 防御分支：role=STUDENT 但缺少 parentId/studentId 时 isStudent 为 false，
+        // 不能按「学生本人」解析出学生，故应视为未选定学生
+        val repository = FakeHomeworkRepository(emptyList())
+        val viewModel = HomeworkListViewModel(
+            repository,
+            FakeAuthRepository(SessionState(role = Role.STUDENT)),
+            FixedClock(),
+            zone)
+
+        viewModel.start(OTHER_STUDENT_ID)
+        advanceUntilIdle()
+
+        val state = viewModel.uiState.value
+        assertTrue("应按未选定学生处理", state.missingStudent)
+        assertNull("不得沿用路由参数暴露他人盘点目标", state.statsStudentId)
+    }
+
+    @Test
+    fun `盘点入口仅在目标学生可用时回抛且回调透传 id 与清单学生一致`() = runTest {
+        val repository = FakeHomeworkRepository(emptyList())
+        val viewModel = HomeworkListViewModel(
+            repository,
+            FakeAuthRepository(parentSession()),
+            FixedClock(),
+            zone,
+        )
+        val opened = mutableListOf<Long>()
+        val callbacks = HomeworkListCallbacks(
+            onBack = {},
+            onAddHomework = {},
+            onEditTime = {},
+            onEditTemplate = {},
+            onMoveUp = {},
+            onMoveDown = {},
+            onDeleteClick = {},
+            onDeleteConfirm = {},
+            onDeleteDismiss = {},
+            onComplete = {},
+            onReopen = {},
+            onOpenStats = { studentId -> opened += studentId },
+        )
+
+        viewModel.start(OTHER_STUDENT_ID)
+        advanceUntilIdle()
+
+        // 复刻 HomeworkListContent 的入口点击体：仅当 statsStudentId 非空才回抛
+        viewModel.uiState.value.statsStudentId?.let(callbacks.onOpenStats)
+
+        assertEquals(listOf(OTHER_STUDENT_ID), opened)
+    }
+
+    @Test
+    fun `目标学生缺失时点击查看盘点不回抛也不触达仓库`() = runTest {
+        val repository = FakeHomeworkRepository(emptyList())
+        val viewModel = HomeworkListViewModel(
+            repository,
+            FakeAuthRepository(parentSession()),
+            FixedClock(),
+            zone,
+        )
+        val opened = mutableListOf<Long>()
+        val callbacks = HomeworkListCallbacks(
+            onBack = {},
+            onAddHomework = {},
+            onEditTime = {},
+            onEditTemplate = {},
+            onMoveUp = {},
+            onMoveDown = {},
+            onDeleteClick = {},
+            onDeleteConfirm = {},
+            onDeleteDismiss = {},
+            onComplete = {},
+            onReopen = {},
+            onOpenStats = { studentId -> opened += studentId },
+        )
+
+        viewModel.start(0L)
+        advanceUntilIdle()
+
+        viewModel.uiState.value.statsStudentId?.let(callbacks.onOpenStats)
+
+        assertTrue("门控生效时不应回抛导航意图", opened.isEmpty())
+        assertTrue("盘点入口不得触达作业仓库", repository.startCalls.isEmpty())
+        assertTrue(repository.completeCalls.isEmpty())
+    }
+
     // ---- 测试工具 ----
 
     private fun CoroutineScope.collectEvents(
@@ -246,6 +511,12 @@ class HomeworkListStartFlowTest {
         role = Role.STUDENT,
         parentId = PARENT_ID,
         studentId = STUDENT_ID,
+    )
+
+    private fun parentSession(): SessionState = SessionState(
+        role = Role.PARENT,
+        parentId = PARENT_ID,
+        studentId = null,
     )
 
     private fun homework(
