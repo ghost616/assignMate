@@ -166,7 +166,8 @@ object HomeworkValidators {
      *
      * 归属维度的必要性：改删权只比对录入者角色，故「学生录入但归属另一个学生」的作业会被误判为可调序，
      * 形成跨学生越权面（同一作业在时间维度 [canOperate] 已返回拒绝，两个口径必须一致）。
-     * - 家长：可调序名下（仓库层经 canTargetStudent 圈定）学生的全部作业；
+     * - 家长：可调序名下学生的全部作业（「名下」由仓库层统一归属判定圈定：经 auth 的
+     *   `AuthRepository.isStudentOwnedBy` 校验「作业所属学生属于当前家长」）；
      * - 学生：必须同时满足「自己录入」与「本人名下」（[HomeworkItem.studentId] == [sessionStudentId]），
      *   会话未携带 studentId 时一律拒绝。
      */

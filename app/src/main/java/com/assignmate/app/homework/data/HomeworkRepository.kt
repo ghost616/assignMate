@@ -17,6 +17,10 @@ import kotlinx.coroutines.flow.Flow
  * - 数据范围：按学生维度收敛（studentId），家长归属 id 由 auth 当前会话提供；
  * - 权限规则：学生仅可修改/删除/调整自己录入的作业（created_by_role = STUDENT），家长可改删全部；
  *   权限不符统一返回 PermissionDenied 类结果（不抛异常）；
+ * - 家长归属围栏（全部「按 id 入口」统一叠加，实现为 HomeworkRepositoryImpl 的私有统一判定）：
+ *   目标作业所属学生必须在当前会话可见范围内——家长会话经 auth 的 `AuthRepository.isStudentOwnedBy`
+ *   判定为「本人名下学生」，学生会话沿用「仅本人名下」；判定顺序为「会话有效性 + 权限维度在前、
+ *   归属维随后」，失败一律返回各自 PermissionDenied 类结果且不改动任何数据；
  * - 时间校验：设定开始时间与预估时长时先校验 deadline 约束与同学生时间段防冲突（排除自身），
  *   失败返回机器可读原因供 UI 提示；
  * - 状态流转：录入时为「已记录」；markPending / startProgress / complete / reopen

@@ -223,7 +223,7 @@ class HomeworkValidatorsTest {
             "学生会话缺少本人 id 时一律拒绝",
             HomeworkValidators.canReorder(ownRecorded, Role.STUDENT, sessionStudentId = null),
         )
-        // 家长不受归属维度影响（家长侧归属范围由仓库 canTargetStudent 圈定）
+        // 家长不受归属维度影响（家长侧归属范围由仓库层统一归属判定圈定）
         assertTrue(HomeworkValidators.canReorder(ownRecorded, Role.PARENT, sessionStudentId = null))
         assertTrue(HomeworkValidators.canReorder(parentRecorded, Role.PARENT, sessionStudentId = 99L))
     }
@@ -235,7 +235,7 @@ class HomeworkValidatorsTest {
         val parentItem = item(createdByRole = CreatorRole.PARENT)
         val studentItem = item(id = 2L, createdByRole = CreatorRole.STUDENT)
 
-        // 家长归属范围由仓库层按会话圈定（canTargetStudent），此处只验证角色维度一律放行
+        // 家长归属范围由仓库层统一归属判定按会话圈定，此处只验证角色维度一律放行
         assertTrue(HomeworkValidators.canOperate(parentItem, Role.PARENT, sessionStudentId = null))
         assertTrue(HomeworkValidators.canOperate(studentItem, Role.PARENT, sessionStudentId = null))
     }

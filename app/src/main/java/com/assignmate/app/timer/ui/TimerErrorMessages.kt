@@ -20,6 +20,14 @@ object TimerErrorMessages {
     /** 执行权不足统一提示 */
     const val PERMISSION_DENIED = "这项作业不是你负责的，暂时不能计时哦"
 
+    /**
+     * 会话操作被归属围栏拒绝的统一提示（暂停/恢复/完成的 [PermissionDenied]）。
+     *
+     * 覆盖「无有效会话（未登录）」与「该次计时不属于当前身份（跨学生/跨家长越权）」两种原因：
+     * 两者对用户的下一步都是「退出后重新进入」，故不细分（细分还会泄露他人会话是否存在）。
+     */
+    const val SESSION_PERMISSION_DENIED = "当前身份不能操作这次计时，请重新进入后再试"
+
     /** 开始计时结果文案 */
     fun startMessage(result: TimerStartResult): String = when (result) {
         is TimerStartResult.Success -> "开始计时啦，专心做这一项吧！"
@@ -34,6 +42,7 @@ object TimerErrorMessages {
     fun pauseMessage(result: TimerPauseResult): String = when (result) {
         is TimerPauseResult.Success -> "已暂停，计时先停在这里，记得回来哦"
         TimerPauseResult.SessionNotFound -> "计时记录不存在，请重新开始"
+        TimerPauseResult.PermissionDenied -> SESSION_PERMISSION_DENIED
         is TimerPauseResult.IllegalPhase -> illegalPhaseMessage(result.phase, "暂停")
     }
 
@@ -41,6 +50,7 @@ object TimerErrorMessages {
     fun resumeMessage(result: TimerResumeResult): String = when (result) {
         is TimerResumeResult.Success -> "欢迎回来，接着做吧！"
         TimerResumeResult.SessionNotFound -> "计时记录不存在，请重新开始"
+        TimerResumeResult.PermissionDenied -> SESSION_PERMISSION_DENIED
         is TimerResumeResult.IllegalPhase -> illegalPhaseMessage(result.phase, "继续")
         TimerResumeResult.PauseRecordMissing -> "暂停记录不完整，请点「完成作业」结束本次计时"
     }
@@ -49,6 +59,7 @@ object TimerErrorMessages {
     fun completeMessage(result: TimerCompleteResult): String = when (result) {
         is TimerCompleteResult.Success -> "完成啦，先去休息一下吧！"
         TimerCompleteResult.SessionNotFound -> "计时记录不存在，请重新开始"
+        TimerCompleteResult.PermissionDenied -> SESSION_PERMISSION_DENIED
         is TimerCompleteResult.IllegalPhase -> illegalPhaseMessage(result.phase, "完成")
         is TimerCompleteResult.HomeworkSyncFailed -> "作业状态更新失败，计时未结束，请稍后再试"
     }

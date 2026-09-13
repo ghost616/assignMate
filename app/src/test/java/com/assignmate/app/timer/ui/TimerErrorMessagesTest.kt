@@ -89,6 +89,10 @@ class TimerErrorMessagesTest {
     fun `暂停的会话不存在与非法阶段分支文案`() {
         assertEquals("计时记录不存在，请重新开始", TimerErrorMessages.pauseMessage(TimerPauseResult.SessionNotFound))
         assertEquals(
+            TimerErrorMessages.SESSION_PERMISSION_DENIED,
+            TimerErrorMessages.pauseMessage(TimerPauseResult.PermissionDenied),
+        )
+        assertEquals(
             "还没有开始计时，不能暂停",
             TimerErrorMessages.pauseMessage(TimerPauseResult.IllegalPhase(TimerPhase.IDLE)),
         )
@@ -124,6 +128,10 @@ class TimerErrorMessagesTest {
             TimerErrorMessages.resumeMessage(TimerResumeResult.SessionNotFound),
         )
         assertEquals(
+            TimerErrorMessages.SESSION_PERMISSION_DENIED,
+            TimerErrorMessages.resumeMessage(TimerResumeResult.PermissionDenied),
+        )
+        assertEquals(
             "暂停记录不完整，请点「完成作业」结束本次计时",
             TimerErrorMessages.resumeMessage(TimerResumeResult.PauseRecordMissing),
         )
@@ -157,6 +165,10 @@ class TimerErrorMessagesTest {
         assertEquals(
             "计时记录不存在，请重新开始",
             TimerErrorMessages.completeMessage(TimerCompleteResult.SessionNotFound),
+        )
+        assertEquals(
+            TimerErrorMessages.SESSION_PERMISSION_DENIED,
+            TimerErrorMessages.completeMessage(TimerCompleteResult.PermissionDenied),
         )
         assertEquals(
             "作业状态更新失败，计时未结束，请稍后再试",
@@ -211,8 +223,10 @@ class TimerErrorMessagesTest {
             )
             add(TimerErrorMessages.pauseMessage(TimerPauseResult.Success(session())))
             add(TimerErrorMessages.pauseMessage(TimerPauseResult.SessionNotFound))
+            add(TimerErrorMessages.pauseMessage(TimerPauseResult.PermissionDenied))
             add(TimerErrorMessages.resumeMessage(TimerResumeResult.Success(session())))
             add(TimerErrorMessages.resumeMessage(TimerResumeResult.SessionNotFound))
+            add(TimerErrorMessages.resumeMessage(TimerResumeResult.PermissionDenied))
             add(TimerErrorMessages.resumeMessage(TimerResumeResult.PauseRecordMissing))
             add(
                 TimerErrorMessages.completeMessage(
@@ -220,6 +234,7 @@ class TimerErrorMessagesTest {
                 ),
             )
             add(TimerErrorMessages.completeMessage(TimerCompleteResult.SessionNotFound))
+            add(TimerErrorMessages.completeMessage(TimerCompleteResult.PermissionDenied))
             add(
                 TimerErrorMessages.completeMessage(
                     TimerCompleteResult.HomeworkSyncFailed(HomeworkStatusResult.NotFound),
@@ -268,6 +283,23 @@ class TimerErrorMessagesTest {
     fun `会话失效与权限不足文案可复用常量`() {
         assertTrue(TimerErrorMessages.NO_ACTIVE_SESSION.isNotBlank())
         assertTrue(TimerErrorMessages.PERMISSION_DENIED.isNotBlank())
+        assertTrue(TimerErrorMessages.SESSION_PERMISSION_DENIED.isNotBlank())
+    }
+
+    /**
+     * 归属围栏三类 PermissionDenied 共用同一条文案：暂停/恢复/完成被拒后，
+     * 用户下一步都是「重新进入」，不应因动作不同给出互相矛盾的指引。
+     */
+    @Test
+    fun `暂停恢复完成的权限失败文案统一`() {
+        val messages = listOf(
+            TimerErrorMessages.pauseMessage(TimerPauseResult.PermissionDenied),
+            TimerErrorMessages.resumeMessage(TimerResumeResult.PermissionDenied),
+            TimerErrorMessages.completeMessage(TimerCompleteResult.PermissionDenied),
+        )
+
+        assertEquals(1, messages.toSet().size)
+        assertEquals(TimerErrorMessages.SESSION_PERMISSION_DENIED, messages.first())
     }
 
     private fun session(): TimerSession = TimerSession(

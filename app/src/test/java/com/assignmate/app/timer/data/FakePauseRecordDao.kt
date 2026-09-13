@@ -13,7 +13,8 @@ import kotlinx.coroutines.flow.map
  * 关键行为与真实 SQL 对齐：
  * - 查询排序按 pause_start_at ASC；
  * - [findUnfinishedBySession] 只取 pause_end_at 为 null 的记录（按开始时刻倒序取最新一条）；
- * - [finishPause] 仅对未结束记录生效（重复调用不覆盖已有结束时刻）。
+ * - [finishPause] 仅对未结束记录生效（重复调用不覆盖已有结束时刻）；
+ * - [writeCount] 累计写操作次数，供「越权被拒绝时不得产生任何写入」的断言使用。
  */
 class FakePauseRecordDao : PauseRecordDao {
 
@@ -21,9 +22,14 @@ class FakePauseRecordDao : PauseRecordDao {
     private var nextId = 1L
     private val revision = MutableStateFlow(0)
 
+    /** 累计写操作次数（只增不减，供越权「零写入」断言比对前后快照） */
+    var writeCount: Int = 0
+        private set
+
     override suspend fun insert(item: PauseRecordEntity): Long {
         val id = nextId++
         rows += item.copy(id = id)
+        writeCount++
         touch()
         return id
     }
@@ -34,12 +40,14 @@ class FakePauseRecordDao : PauseRecordDao {
         val index = rows.indexOfFirst { it.id == item.id }
         if (index >= 0) {
             rows[index] = item
+            writeCount++
             touch()
         }
     }
 
     override suspend fun delete(item: PauseRecordEntity) {
         if (rows.removeAll { it.id == item.id }) {
+            writeCount++
             touch()
         }
     }
@@ -61,6 +69,7 @@ class FakePauseRecordDao : PauseRecordDao {
         val index = rows.indexOfFirst { it.id == pauseRecordId && it.pauseEndAt == null }
         if (index >= 0) {
             rows[index] = rows[index].copy(pauseEndAt = Instant.ofEpochMilli(pauseEndAtMillis))
+            writeCount++
             touch()
         }
     }

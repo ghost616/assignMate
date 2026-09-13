@@ -15,7 +15,6 @@ import com.assignmate.app.stats.domain.TimerSessionFacts
 import com.assignmate.app.timer.data.TimerRepository
 import com.assignmate.app.timer.domain.PauseRecord
 import com.assignmate.app.timer.domain.TimerSession
-import java.time.LocalDate
 import java.time.ZoneId
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -25,8 +24,9 @@ import javax.inject.Singleton
  * 不新增数据库表、不改动任何既有数据、不触发任何写操作。
  *
  * 关键约定：
- * - 归属与越权（与 homework/timer 同源口径）：目标学生由调用方显式传入，仓库层按当前会话兜底校验——
- *   学生会话仅可为本人，家长会话仅可为其名下学生（经 [AuthRepository.getStudent] 校验归属）；
+ * - 归属与越权（与 homework/timer 同一口径）：目标学生由调用方显式传入，仓库层按当前会话兜底校验——
+ *   学生会话仅可为本人，家长会话仅可为其名下学生（统一经 auth 的 [AuthRepository.isStudentOwnedBy] /
+ *   [AuthRepository.ownedStudentIds] 判定，本模块不再自建等价的归属实现）；
  *   校验不通过统一返回 [StatsFailure.ACCESS_DENIED]，**不抛业务异常**、也不返回他人数据。
  * - 时间口径：所有时刻经可注入 [Clock] 取「现在」，业务自然日由注入的 [ZoneId] 决定
  *   （与 homework 模块绑定的业务时区同源，避免日期口径漂移）；聚合口径
@@ -72,12 +72,13 @@ class StatsRepositoryImpl @Inject constructor(
         }
         val item = runCatching { homeworkRepository.getHomework(homeworkId) }.getOrNull()
             ?: return StatsResult.Failure(StatsFailure.HOMEWORK_NOT_FOUND)
-        if (!canTargetStudent(session, item.studentId)) {
+        if (!isStudentVisible(session, item.studentId)) {
             return StatsResult.Failure(StatsFailure.ACCESS_DENIED)
         }
         // 详情页以**作业归属**为准取数（作业的 studentId 即数据维度），此处显式校验「会话可见学生」
         // 与「作业归属学生」一致：路由学生与作业归属不符时收敛为 ACCESS_DENIED，
-        // 避免静默按作业归属展示出与调用方预期不同的学生数据。
+        // 避免静默按作业归属展示出与调用方预期不同的学生数据（可见学生经 auth 的
+        // [AuthRepository.ownedStudentIds] 统一解析，多学生家长无法唯一确定时不做该校验）。
         val targetStudentId = resolveVisibleStudentId(session)
         if (targetStudentId != null && targetStudentId != item.studentId) {
             return StatsResult.Failure(StatsFailure.ACCESS_DENIED)
@@ -163,28 +164,38 @@ class StatsRepositoryImpl @Inject constructor(
         if (session.role == null) {
             return StatsFailure.NO_ACTIVE_SESSION
         }
-        return if (canTargetStudent(session, studentId)) null else StatsFailure.ACCESS_DENIED
+        return if (isStudentVisible(session, studentId)) null else StatsFailure.ACCESS_DENIED
     }
 
-    /** 目标学生是否属于当前会话可见范围：学生会话仅限本人，家长会话仅限本人名下学生 */
-    private suspend fun canTargetStudent(session: SessionState, studentId: Long): Boolean = when (session.role) {
-        Role.STUDENT -> session.studentId == studentId
-        Role.PARENT -> session.parentId != null &&
-            runCatching { authRepository.getStudent(studentId)?.parentAccountId == session.parentId }
-                .getOrDefault(false)
-
-        null -> false
+    /**
+     * 学生 [studentId] 是否在当前会话 [session] 的可见范围内（本模块归属判定的唯一口径）：
+     * 学生会话仅限本人（`session.studentId == studentId`）；家长会话仅限名下学生（经 auth 的
+     * [AuthRepository.isStudentOwnedBy]，与 homework/timer 共用同一归属能力，替代本模块原先私有的
+     * 等价实现）；无会话一律不可见。
+     *
+     * 异常语义：不在此处用 runCatching 包裹——[AuthRepository.isStudentOwnedBy] 契约已把数据层异常
+     * 收敛为 false 并显式重抛 [kotlin.coroutines.cancellation.CancellationException]（结构化并发语义
+     * 得以保留），外层再包一层 runCatching 反而可能吞掉协程取消，使取消信号被降级成 ACCESS_DENIED。
+     */
+    private suspend fun isStudentVisible(session: SessionState, studentId: Long): Boolean {
+        val parentId = session.parentId
+        return when (session.role) {
+            Role.STUDENT -> session.studentId == studentId
+            Role.PARENT -> parentId != null && authRepository.isStudentOwnedBy(parentId, studentId)
+            null -> false
+        }
     }
 
     /**
      * 当前会话**唯一确定**的可见学生 id：学生会话固定为本人；家长会话在仅有一名学生时可确定，
      * 多学生时无法从会话本身推断（需由调用方显式传学生维度），故返回 null（不做一致性校验）。
+     *
+     * 家长分支经 auth 的统一归属能力 [AuthRepository.ownedStudentIds] 取数（与 homework/timer 同源），
+     * 其契约已把数据层异常收敛为空集并显式重抛协程取消异常，故此处无需再包 runCatching。
      */
     private suspend fun resolveVisibleStudentId(session: SessionState): Long? = when (session.role) {
         Role.STUDENT -> session.studentId
-        Role.PARENT -> session.parentId?.let { parentId ->
-            runCatching { authRepository.listStudents(parentId).singleOrNull()?.id }.getOrNull()
-        }
+        Role.PARENT -> session.parentId?.let { parentId -> authRepository.ownedStudentIds(parentId).singleOrNull() }
 
         null -> null
     }

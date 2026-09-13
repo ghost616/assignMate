@@ -13,6 +13,9 @@ import kotlinx.coroutines.flow.map
  * 排序/查询口径与真实 SQL 保持一致（started_at ASC；按 student+status 过滤），
  * 便于确定性验证「恢复现场」「按学生取未结束会话」等仓库行为；
  * 变更后以 revision 触发 Flow 重新发射，模拟 Room 的观察语义。
+ *
+ * [writeCount] 累计写操作次数（insert/update/delete 及按 id 的字段更新各计一次），
+ * 供「越权被拒绝时不得产生任何写入」的断言使用。
  */
 class FakeTimerSessionDao : TimerSessionDao {
 
@@ -20,9 +23,14 @@ class FakeTimerSessionDao : TimerSessionDao {
     private var nextId = 1L
     private val revision = MutableStateFlow(0)
 
+    /** 累计写操作次数（只增不减，供越权「零写入」断言比对前后快照） */
+    var writeCount: Int = 0
+        private set
+
     override suspend fun insert(item: TimerSessionEntity): Long {
         val id = nextId++
         rows += item.copy(id = id)
+        writeCount++
         touch()
         return id
     }
@@ -33,12 +41,14 @@ class FakeTimerSessionDao : TimerSessionDao {
         val index = rows.indexOfFirst { it.id == item.id }
         if (index >= 0) {
             rows[index] = item
+            writeCount++
             touch()
         }
     }
 
     override suspend fun delete(item: TimerSessionEntity) {
         if (rows.removeAll { it.id == item.id }) {
+            writeCount++
             touch()
         }
     }
@@ -86,6 +96,7 @@ class FakeTimerSessionDao : TimerSessionDao {
         val index = rows.indexOfFirst { it.id == sessionId }
         if (index >= 0) {
             rows[index] = transform(rows[index])
+            writeCount++
             touch()
         }
     }

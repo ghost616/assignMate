@@ -3,7 +3,12 @@ package com.assignmate.app.auth.data
 import com.assignmate.app.auth.domain.PasswordHasher
 import com.assignmate.app.auth.domain.Role
 import com.assignmate.app.auth.domain.SessionState
+import com.assignmate.app.core.data.db.dao.StudentDao
 import com.assignmate.app.core.domain.time.Clock
+import kotlin.coroutines.cancellation.CancellationException
+import io.mockk.coEvery
+import io.mockk.coVerify
+import io.mockk.mockk
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -28,12 +33,15 @@ class AuthRepositoryImplTest {
         val parentDao = FakeParentAccountDao()
         val studentDao = FakeStudentDao()
         val store = FakeKeyValueStore()
-        val clock: Clock = Clock { FIXED_MILLIS }
+        val clock: Clock = FIXED_CLOCK
         val repository = AuthRepositoryImpl(parentDao, studentDao, store, clock)
     }
 
     private companion object {
         const val FIXED_MILLIS = 1_700_000_000_000L
+
+        /** 固定时钟：测试不依赖真实时间，保证验证码生成、创建时间等断言确定 */
+        val FIXED_CLOCK: Clock = Clock { FIXED_MILLIS }
     }
 
     private fun newEnv(): Env = Env()
@@ -288,6 +296,137 @@ class AuthRepositoryImplTest {
         val result = env.repository.deleteStudent(added.id)
         assertEquals(DeleteStudentResult.Success, result)
         assertTrue(env.repository.listStudents(parentId).isEmpty())
+    }
+
+    // ---- 家长-学生归属校验（统一口径，供 homework/timer/stats 复用） ----
+
+    @Test
+    fun `名下学生归属校验为真`() = runTest {
+        val env = newEnv()
+        env.repository.registerParent(account, password)
+        val parentId = env.repository.currentSession().parentId!!
+        val added = (env.repository.addStudent(parentId, "小明") as AddStudentResult.Success).student
+
+        assertTrue(env.repository.isStudentOwnedBy(parentId, added.id))
+    }
+
+    @Test
+    fun `他人学生归属校验为假`() = runTest {
+        val env = newEnv()
+        env.repository.registerParent(account, password)
+        val firstParentId = env.repository.currentSession().parentId!!
+        val added = (env.repository.addStudent(firstParentId, "小明") as AddStudentResult.Success).student
+        env.repository.registerParent("parent002", password)
+        val secondParentId = env.repository.currentSession().parentId!!
+
+        assertNotEquals(firstParentId, secondParentId)
+        assertTrue(env.repository.isStudentOwnedBy(firstParentId, added.id))
+        assertFalse(env.repository.isStudentOwnedBy(secondParentId, added.id))
+    }
+
+    @Test
+    fun `学生不存在时归属校验为假`() = runTest {
+        val env = newEnv()
+        env.repository.registerParent(account, password)
+        val parentId = env.repository.currentSession().parentId!!
+
+        assertFalse(env.repository.isStudentOwnedBy(parentId, 999L))
+        // 家长不存在同样收敛为假
+        assertFalse(env.repository.isStudentOwnedBy(999L, 999L))
+    }
+
+    @Test
+    fun `非法家长或学生 id 归属校验为假`() = runTest {
+        val env = newEnv()
+        env.repository.registerParent(account, password)
+        val parentId = env.repository.currentSession().parentId!!
+        val added = (env.repository.addStudent(parentId, "小明") as AddStudentResult.Success).student
+
+        assertFalse(env.repository.isStudentOwnedBy(0L, added.id))
+        assertFalse(env.repository.isStudentOwnedBy(-1L, added.id))
+        assertFalse(env.repository.isStudentOwnedBy(parentId, 0L))
+        assertFalse(env.repository.isStudentOwnedBy(parentId, -1L))
+    }
+
+    @Test
+    fun `非法 id 不触达数据层直接返回`() = runTest {
+        val dao = mockk<StudentDao>()
+        val repository = AuthRepositoryImpl(FakeParentAccountDao(), dao, FakeKeyValueStore(), FIXED_CLOCK)
+
+        assertFalse(repository.isStudentOwnedBy(0L, 1L))
+        assertTrue(repository.ownedStudentIds(0L).isEmpty())
+        coVerify(exactly = 0) { dao.findById(any()) }
+        coVerify(exactly = 0) { dao.findByParentAccountId(any()) }
+    }
+
+    @Test
+    fun `ownedStudentIds 返回名下全部学生 id`() = runTest {
+        val env = newEnv()
+        env.repository.registerParent(account, password)
+        val parentId = env.repository.currentSession().parentId!!
+        val first = (env.repository.addStudent(parentId, "小明") as AddStudentResult.Success).student
+        val second = (env.repository.addStudent(parentId, "小美") as AddStudentResult.Success).student
+
+        assertEquals(setOf(first.id, second.id), env.repository.ownedStudentIds(parentId))
+    }
+
+    @Test
+    fun `ownedStudentIds 无学生或家长不存在返回空集`() = runTest {
+        val env = newEnv()
+        env.repository.registerParent(account, password)
+        val parentId = env.repository.currentSession().parentId!!
+        env.repository.registerParent("parent002", password)
+        val otherParentId = env.repository.currentSession().parentId!!
+        env.repository.addStudent(otherParentId, "小刚")
+
+        assertTrue(env.repository.ownedStudentIds(parentId).isEmpty())
+        assertTrue(env.repository.ownedStudentIds(999L).isEmpty())
+    }
+
+    @Test
+    fun `ownedStudentIds 非法家长 id 返回空集`() = runTest {
+        val env = newEnv()
+        env.repository.registerParent(account, password)
+
+        assertTrue(env.repository.ownedStudentIds(0L).isEmpty())
+        assertTrue(env.repository.ownedStudentIds(-1L).isEmpty())
+    }
+
+    @Test
+    fun `归属查询数据层异常时收敛为假与空集`() = runTest {
+        val dao = mockk<StudentDao>()
+        coEvery { dao.findById(any()) } throws IllegalStateException("db down")
+        coEvery { dao.findByParentAccountId(any()) } throws IllegalStateException("db down")
+        val repository = AuthRepositoryImpl(FakeParentAccountDao(), dao, FakeKeyValueStore(), FIXED_CLOCK)
+
+        assertFalse(repository.isStudentOwnedBy(1L, 2L))
+        assertTrue(repository.ownedStudentIds(1L).isEmpty())
+    }
+
+    @Test
+    fun `归属查询遇协程取消异常时继续向上传播`() {
+        val dao = mockk<StudentDao>()
+        coEvery { dao.findById(any()) } throws CancellationException("coroutine cancelled")
+        coEvery { dao.findByParentAccountId(any()) } throws CancellationException("coroutine cancelled")
+        val repository = AuthRepositoryImpl(FakeParentAccountDao(), dao, FakeKeyValueStore(), FIXED_CLOCK)
+
+        // 取消信号不得被"异常收敛为 false/空集"吞掉，否则破坏结构化并发
+        assertEquals("coroutine cancelled", runAndCaptureCancellation { repository.isStudentOwnedBy(1L, 2L) })
+        assertEquals("coroutine cancelled", runAndCaptureCancellation { repository.ownedStudentIds(1L) })
+    }
+
+    /** 执行 suspend 查询并捕获其抛出的 [CancellationException]（未抛出则本用例失败） */
+    private fun runAndCaptureCancellation(block: suspend () -> Unit): String? {
+        var caught: CancellationException? = null
+        runTest {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                caught = e
+            }
+        }
+        assertNotNull("查询吞掉了协程取消异常，破坏了结构化并发", caught)
+        return caught?.message
     }
 
     // ---- 验证码管理 ----

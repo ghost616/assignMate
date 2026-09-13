@@ -38,6 +38,12 @@ class TimerTestEnv(
     val homeworkDao = FakeHomeworkItemDao()
     val authRepository = FakeAuthRepository(initialSession)
 
+    init {
+        // homework 仓库的家长归属围栏经 auth 的 isStudentOwnedBy 判定，故需登记学生档案
+        // （timer 场景固定「家长 PARENT_ID 名下学生 STUDENT_ID」，与 seedHomework 的归属一致）
+        authRepository.addStudentProfile(id = STUDENT_ID, parentAccountId = PARENT_ID)
+    }
+
     /** 真实 homework 仓库（内存 DAO + 内存 auth + 同一时钟）：作业状态同步口径与生产一致 */
     val homeworkRepository = HomeworkRepositoryImpl(homeworkDao, authRepository, clock, ZONE)
 

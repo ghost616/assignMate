@@ -16,6 +16,7 @@ import com.assignmate.app.core.domain.time.Clock
 import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
@@ -29,7 +30,9 @@ import kotlinx.coroutines.flow.map
  *   使 "Parent001" 与 "parent001" 视为同一账号，杜绝大小写造成重复注册与登录歧义；
  * - 注册前查账号唯一性；密码经 [PasswordHasher] 哈希后存储，严禁明文落库；
  * - 新增学生前拦截超出 [AuthConstants.MAX_STUDENTS]；验证码同家长内唯一；
- * - 学生进入以“家长账号 + 验证码”组合查询，未知组合一律 [StudentEnterFailure.CODE_MISMATCH]。
+ * - 学生进入以“家长账号 + 验证码”组合查询，未知组合一律 [StudentEnterFailure.CODE_MISMATCH]；
+ * - 家长-学生归属校验（[isStudentOwnedBy] / [ownedStudentIds]）为跨模块统一口径，
+ *   homework/timer/stats 等模块的家长分支归属判定应复用本能力，替代各自私有实现。
  */
 @Singleton
 class AuthRepositoryImpl @Inject constructor(
@@ -172,6 +175,26 @@ class AuthRepositoryImpl @Inject constructor(
     override suspend fun getStudent(studentId: Long): Student? =
         studentDao.findById(studentId)?.toDomain()
 
+    // ---- 家长-学生归属校验（统一口径） ----
+
+    override suspend fun isStudentOwnedBy(parentId: Long, studentId: Long): Boolean {
+        if (parentId <= 0L || studentId <= 0L) {
+            return false
+        }
+        return fallbackOnDataError(fallback = false) {
+            studentDao.findById(studentId)?.parentAccountId == parentId
+        }
+    }
+
+    override suspend fun ownedStudentIds(parentId: Long): Set<Long> {
+        if (parentId <= 0L) {
+            return emptySet()
+        }
+        return fallbackOnDataError(fallback = emptySet()) {
+            studentDao.findByParentAccountId(parentId).mapTo(mutableSetOf()) { it.id }
+        }
+    }
+
     // ---- 验证码管理 ----
 
     override suspend fun resetStudentVerificationCode(
@@ -235,6 +258,19 @@ class AuthRepositoryImpl @Inject constructor(
     }
 
     // ---- 私有工具 ----
+
+    /**
+     * 归属类只读查询的异常收敛：DAO/存储异常一律返回 [fallback]（归属校验不抛业务异常），
+     * 但协程取消异常必须继续向上传播，避免吞掉取消信号破坏结构化并发。
+     */
+    private inline fun <T> fallbackOnDataError(fallback: T, block: () -> T): T =
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            fallback
+        }
 
     /** 账号统一规范化：去首尾空白 + 转小写，保证账号大小写不敏感（ASCII 转换不影响长度） */
     private fun normalizeAccount(account: String): String = account.trim().lowercase()

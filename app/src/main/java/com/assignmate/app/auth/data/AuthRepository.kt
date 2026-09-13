@@ -2,11 +2,13 @@ package com.assignmate.app.auth.data
 
 import com.assignmate.app.auth.domain.SessionState
 import com.assignmate.app.auth.domain.Student
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.flow.Flow
 
 /**
  * auth 仓库接口：家长账号（注册/登录/登出）、学生档案 CRUD、验证码管理、
- * 学生进入校验与会话持久化（KeyValueStore 落盘 + 可观察 Flow）。
+ * 学生进入校验与会话持久化（KeyValueStore 落盘 + 可观察 Flow），
+ * 以及家长-学生归属校验（homework/timer/stats 共用的统一口径）。
  *
  * 实现契约：所有方法不抛业务异常，成败统一收敛为密封结果（reason 枚举机器可读，
  * 用户文案由 UI 层映射）；家长账号入库/查询前一律规范化（trim + 转小写，大小写不敏感），
@@ -46,6 +48,57 @@ interface AuthRepository {
 
     /** 按 id 查询学生（用于会话学生端展示等；不存在返回 null） */
     suspend fun getStudent(studentId: Long): Student?
+
+    // ---- 家长-学生归属校验（统一口径，供 homework/timer/stats 等业务模块共用） ----
+    /**
+     * 判断学生档案 [studentId] 是否归属于家长 [parentId]（即档案存在且 parentAccountId == parentId）。
+     *
+     * 本方法为跨模块归属校验的**唯一口径**：homework/timer/stats 等模块的「目标学生是否在当前会话
+     * 可见范围内」判定（家长分支）应统一复用本方法，替代各自私有的 `canTargetStudent` 等价实现，
+     * 避免归属口径出现分叉。学生会话场景请结合会话 [SessionState.studentId] 自行判定「仅限本人」。
+     *
+     * 契约：不抛业务异常，任何数据层异常/档案不存在均收敛为 false；[parentId] 或 [studentId] 非正直接返回 false。
+     *
+     * 默认实现基于 [getStudent]（测试替身与自定义实现零改动即语义一致）；
+     * 生产实现 [AuthRepositoryImpl] 覆写为直连 StudentDao 的单次按主键查询。
+     */
+    suspend fun isStudentOwnedBy(parentId: Long, studentId: Long): Boolean {
+        if (parentId <= 0L || studentId <= 0L) {
+            return false
+        }
+        return try {
+            getStudent(studentId)?.parentAccountId == parentId
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 取家长 [parentId] 名下全部学生 id（供批量/列表场景一次取数，避免逐条调用
+     * [isStudentOwnedBy] 造成 N 次查询）。
+     *
+     * 契约：不抛业务异常，异常/无学生均收敛为空集；[parentId] 非正直接返回空集。
+     * 调用方可用 `studentId in ownedStudentIds(parentId)` 做批量归属过滤。
+     *
+     * 默认实现基于 [listStudents]（测试替身与自定义实现零改动即语义一致）；
+     * 生产实现 [AuthRepositoryImpl] 覆写为直连 StudentDao 的单次家长维度查询。
+     *
+     * @return 该家长名下学生 id 集合（家长不存在或名下无学生时为空集）
+     */
+    suspend fun ownedStudentIds(parentId: Long): Set<Long> {
+        if (parentId <= 0L) {
+            return emptySet()
+        }
+        return try {
+            listStudents(parentId).mapTo(mutableSetOf()) { it.id }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            emptySet()
+        }
+    }
 
     // ---- 验证码管理 ----
     /** 重新生成某学生的进入验证码（同家长内唯一） */

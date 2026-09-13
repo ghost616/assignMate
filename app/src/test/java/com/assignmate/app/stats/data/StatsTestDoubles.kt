@@ -51,7 +51,13 @@ import kotlinx.coroutines.flow.flowOf
  *   使「当日窗口 / 跨天裁剪 / 暂停折算」等口径在测试中完全确定。
  */
 
-/** 内存版 auth 仓库：只提供会话读取与学生档案（stats 只读聚合所需） */
+/**
+ * 内存版 auth 仓库：只提供会话读取与学生档案（stats 只读聚合所需）。
+ *
+ * 归属校验（[AuthRepository.isStudentOwnedBy] / [AuthRepository.ownedStudentIds]）**刻意不覆写**，
+ * 直接沿用接口默认实现（基于本替身的 [getStudent] / [listStudents]，语义与生产实现一致），
+ * 既让被测仓库经统一口径取数（stats 不再自建等价实现），也顺带看护接口默认实现这一回退路径。
+ */
 internal class FakeStatsAuthRepository(
     initialSession: SessionState = SessionState(
         role = Role.STUDENT,

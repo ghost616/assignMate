@@ -2,6 +2,7 @@ package com.assignmate.app.timer.data
 
 import com.assignmate.app.auth.data.AuthRepository
 import com.assignmate.app.auth.domain.Role
+import com.assignmate.app.auth.domain.SessionState
 import com.assignmate.app.core.data.db.dao.PauseRecordDao
 import com.assignmate.app.core.data.db.dao.TimerSessionDao
 import com.assignmate.app.core.data.db.entity.PauseRecordEntity
@@ -9,6 +10,7 @@ import com.assignmate.app.core.data.db.entity.TimerSessionEntity
 import com.assignmate.app.core.domain.time.Clock
 import com.assignmate.app.homework.data.HomeworkRepository
 import com.assignmate.app.homework.data.HomeworkStatusResult
+import com.assignmate.app.homework.domain.HomeworkItem
 import com.assignmate.app.homework.domain.HomeworkValidators
 import com.assignmate.app.timer.domain.PauseRecord
 import com.assignmate.app.timer.domain.TimerCalculations
@@ -31,8 +33,13 @@ import javax.inject.Singleton
  *   并把「累计暂停时长 + 暂停次数」汇总写入会话（明细为权威口径，汇总仅为快照）；
  * - 作业同步顺序：完成时先调 homework.complete（幂等），成功后再收尾会话——
  *   万一收尾失败，留下的是「作业已完成、会话未收尾」这一可重试状态；
- * - 权限：执行权与 homework 同源（[HomeworkValidators.canOperate]），
- *   角色取当前会话（authoritative），作业状态流转调用使用入参 [Role]；
+ * - 权限（写入口围栏，口径全模块统一）：
+ *   1) 执行权与 homework 同源（[HomeworkValidators.canOperate]），角色取当前会话（authoritative），
+ *      作业状态流转调用使用入参 [Role]；
+ *   2) 归属围栏：家长仅限**名下学生**（经 auth 的 [AuthRepository.isStudentOwnedBy]，与 homework 共用同一口径），
+ *      学生仅限本人名下；[startSession] 以作业所属学生为目标，暂停/恢复/完成以**会话库内所属 studentId** 为目标；
+ *   3) 拒绝统一为各自结果的 `PermissionDenied`，且拒绝分支不产生任何写入
+ *      （不建会话、不改作业状态、不写暂停明细、不改会话状态）；
  * - 时间：统一取 [Clock]，测试注入固定时钟即可确定性验证暂停时长与超时口径；
  * - 事务边界：凡是「多次 DAO 写必须一起成功」的场景（暂停落明细 + 置状态、完成时结束时刻 + 暂停汇总、
  *   恢复时清理重复暂停 + 收尾 + 更新汇总）统一经 [TimerTransactionRunner] 收敛为一次原子提交，
@@ -54,11 +61,15 @@ class TimerRepositoryImpl @Inject constructor(
 
     override suspend fun startSession(homeworkId: Long, sessionRole: Role): TimerStartResult {
         val session = authRepository.currentSession()
-        val role = session.role ?: return TimerStartResult.NoActiveSession
+        // 无有效会话与越权分别映射为不同结果：前者提示「重新进入」，后者提示「这项作业不是你负责的」
+        if (session.role == null) {
+            return TimerStartResult.NoActiveSession
+        }
         val homework = homeworkRepository.getHomework(homeworkId)
             ?: return TimerStartResult.HomeworkNotFound
-        // 执行权：学生仅可对本人名下作业计时（含家长布置的），家长可对名下学生作业计时
-        if (!HomeworkValidators.canOperate(homework, role, session.studentId)) {
+        // 执行权（与 homework 同源：学生仅可对本人名下作业计时）+ 家长归属围栏（家长仅可对名下学生的作业计时），
+        // 越权时不建会话、不改作业状态
+        if (!canOperateHomework(homework, session)) {
             return TimerStartResult.PermissionDenied
         }
         // 幂等：已有未结束会话直接复用（页面返回/重建不重复建会话、不打断走秒）
@@ -87,6 +98,10 @@ class TimerRepositoryImpl @Inject constructor(
 
     override suspend fun pauseSession(sessionId: Long): TimerPauseResult {
         val entity = timerSessionDao.findById(sessionId) ?: return TimerPauseResult.SessionNotFound
+        // 归属围栏先于阶段判定：越权调用无论会话处于什么阶段都一律拒绝，且不写入任何数据
+        if (!canOperateSession(entity)) {
+            return TimerPauseResult.PermissionDenied
+        }
         val phase = TimerPhase.fromSessionStatus(entity.status)
         if (phase != TimerPhase.RUNNING) {
             // 重复暂停 / 已完成会话暂停均被拒绝，且不写入任何明细
@@ -110,6 +125,10 @@ class TimerRepositoryImpl @Inject constructor(
 
     override suspend fun resumeSession(sessionId: Long): TimerResumeResult {
         val entity = timerSessionDao.findById(sessionId) ?: return TimerResumeResult.SessionNotFound
+        // 归属围栏先于阶段判定：越权调用不结束暂停明细、不刷新汇总、不改状态
+        if (!canOperateSession(entity)) {
+            return TimerResumeResult.PermissionDenied
+        }
         val phase = TimerPhase.fromSessionStatus(entity.status)
         if (phase != TimerPhase.PAUSED) {
             return TimerResumeResult.IllegalPhase(phase)
@@ -141,6 +160,10 @@ class TimerRepositoryImpl @Inject constructor(
 
     override suspend fun completeSession(sessionId: Long, sessionRole: Role): TimerCompleteResult {
         val entity = timerSessionDao.findById(sessionId) ?: return TimerCompleteResult.SessionNotFound
+        // 入口归属围栏（不再只依赖下游 homework.complete 间接拦截）：越权时不收尾会话、也不同步作业状态
+        if (!canOperateSession(entity)) {
+            return TimerCompleteResult.PermissionDenied
+        }
         val phase = TimerPhase.fromSessionStatus(entity.status)
         if (!phase.isActive) {
             return TimerCompleteResult.IllegalPhase(phase)
@@ -175,6 +198,49 @@ class TimerRepositoryImpl @Inject constructor(
                 ).toDomain(),
                 homework = synced.item,
             )
+        }
+    }
+
+    // ---- 权限围栏（写入口统一口径） ----
+
+    /**
+     * 作业是否可被当前会话 [session] 执行：执行权与归属围栏**两条判定缺一不可**。
+     *
+     * 为什么需要第二条：[HomeworkValidators.canOperate] 的家长分支恒为 true（「家长可操作名下学生的作业」），
+     * 归属维度不参与其中，故家长会话对**任意学生**的作业都会通过执行权判定；
+     * 由 [isStudentVisible] 经 auth 的 [AuthRepository.isStudentOwnedBy] 补齐「仅限名下学生」。
+     * 学生分支两条判定语义相同（均为「本人名下」），保留 canOperate 是为了与 homework 保持同一执行权口径。
+     */
+    private suspend fun canOperateHomework(homework: HomeworkItem, session: SessionState): Boolean {
+        val role = session.role ?: return false
+        return HomeworkValidators.canOperate(homework, role, session.studentId) &&
+            isStudentVisible(session, homework.studentId)
+    }
+
+    /**
+     * 会话是否可被当前会话操作（暂停/恢复/完成的统一围栏）：
+     * 目标归属取会话**库内所属 studentId**（权威数据，不信任调用方传入），而非入参角色。
+     *
+     * 拒绝场景：无有效会话（未登录/缺角色维度）、学生会话操作他人会话、家长会话操作非名下学生的会话。
+     */
+    private suspend fun canOperateSession(entity: TimerSessionEntity): Boolean =
+        isStudentVisible(authRepository.currentSession(), entity.studentId)
+
+    /**
+     * 学生 [studentId] 是否在当前会话 [session] 的可见范围内（timer 模块归属判定的唯一口径）：
+     * 学生会话仅限本人（`session.studentId == studentId`）；家长会话仅限名下学生（经 auth 的
+     * [AuthRepository.isStudentOwnedBy]，与 homework 模块共用同一归属能力，避免口径分叉）；无会话一律不可见。
+     *
+     * 异常语义：不在此处用 runCatching 包裹——[AuthRepository.isStudentOwnedBy] 契约已把数据层异常收敛为 false
+     * 并显式重抛 [kotlin.coroutines.cancellation.CancellationException]（结构化并发语义得以保留），
+     * 外层再包一层 runCatching 反而可能吞掉协程取消。
+     */
+    private suspend fun isStudentVisible(session: SessionState, studentId: Long): Boolean {
+        val parentId = session.parentId
+        return when (session.role) {
+            Role.STUDENT -> session.studentId == studentId
+            Role.PARENT -> parentId != null && authRepository.isStudentOwnedBy(parentId, studentId)
+            null -> false
         }
     }
 
