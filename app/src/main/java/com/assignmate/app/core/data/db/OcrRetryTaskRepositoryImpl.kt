@@ -1,4 +1,4 @@
-﻿package com.assignmate.app.core.data.db
+package com.assignmate.app.core.data.db
 
 import com.assignmate.app.core.data.db.dao.OcrRetryTaskDao
 import com.assignmate.app.core.data.db.entity.OcrRetryTaskEntity
@@ -34,6 +34,12 @@ class OcrRetryTaskRepositoryImpl @Inject constructor(
     override suspend fun remove(id: Long) {
         dao.deleteById(id)
     }
+
+    override suspend fun clearAll(): Set<String> =
+        // 事务内「先取回全部记录、再清空全表」：4 种状态（PENDING/PROCESSING/SUCCEEDED/FAILED）
+        // 一并清理，返回的路径集合即本次被删除记录引用的图片，保证与库内结果一致。
+        dao.clearAllInTransaction()
+            .mapTo(mutableSetOf<String>()) { it.imageLocalPath }
 
     private fun PendingOcrTask.toEntity(): OcrRetryTaskEntity = OcrRetryTaskEntity(
         id = id,

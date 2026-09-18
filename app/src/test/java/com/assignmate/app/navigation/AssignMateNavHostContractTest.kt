@@ -2,6 +2,7 @@ package com.assignmate.app.navigation
 
 import com.assignmate.app.auth.ui.AuthDestination
 import com.assignmate.app.homework.ui.HomeworkDestination
+import com.assignmate.app.settings.ui.SettingsDestination
 import com.assignmate.app.stats.ui.StatsDestination
 import com.assignmate.app.timer.ui.TimerDestination
 import java.io.File
@@ -194,6 +195,9 @@ class AssignMateNavHostContractTest {
             "toStatsItemDetail",
             "toStatsHistory",
             "toStatsHistoryRange",
+            "toSettingsHome",
+            "toSettingsOcrConfig",
+            "toSettingsTheme",
         )
 
         helpers.forEach { helper ->
@@ -739,6 +743,9 @@ class AssignMateNavHostContractTest {
         "StatsDestination.DAY_SUMMARY" -> StatsDestination.DAY_SUMMARY
         "StatsDestination.ITEM_DETAIL" -> StatsDestination.ITEM_DETAIL
         "StatsDestination.HISTORY" -> StatsDestination.HISTORY
+        "SettingsDestination.HOME" -> SettingsDestination.HOME
+        "SettingsDestination.OCR_CONFIG" -> SettingsDestination.OCR_CONFIG
+        "SettingsDestination.THEME" -> SettingsDestination.THEME
         else -> null
     }
 

@@ -44,6 +44,19 @@ import kotlinx.coroutines.launch
  * 统一流程：识别/输入 → 可编辑文本（[HomeworkEntryUiState.content] 始终可手改）→
  * 选定类型/阶段范围/deadline（规则与 homework-A 一致）→ 保存进既有仓库（权限与校验同源）。
  *
+ * 「识别服务未配置」是唯一需要按会话角色分流的失败：家长可被引导去设置页，学生会话只提示
+ * 「请让家长先配置识别服务」，绝不出现指向无权访问的设置页的文案（学生侧仍保留
+ * 「图片已保存待重试」这一事实信息）。**收敛只有单层**——Snackbar 的文案与「去设置」动作
+ * 一律由 UI 渲染入口 [ocrNoticeFor] 一次产出（本 ViewModel 只发
+ * [HomeworkEntryEvent.NeedsOcrConfiguration] 并携带底层原文，**不预先收敛 Snackbar 文案**，
+ * 否则两层各收敛一次会让家长文案出现重复的按钮说明、或同一提示被渲染两条）；
+ * 常驻表单内联错误（[HomeworkEntryUiState.formError]，由 FormError 常驻渲染）在 ViewModel 侧
+ * 经同一 [ocrNoticeFor] 取值，保证与 Snackbar 同源、不会残留「请到设置页配置」。
+ *
+ * 家长分支是否渲染「去设置」按钮由 UI 按 `onGoToOcrSettings != null` 决定
+ * （见 [ocrSetupGuidance] 的 hasSettingsEntry）：ViewModel 不下发该开关，
+ * 既不引入与 UI 注入时机耦合的构造参数，也避免 Dagger 为裸 Boolean 就近注入无关绑定。
+ *
  * 页面销毁（onCleared）释放语音资源并取消识别协程。
  */
 @HiltViewModel
@@ -256,7 +269,8 @@ class HomeworkEntryViewModel @Inject constructor(
                     content = summary.firstText?.let { appendContent(state.content, it) } ?: state.content,
                 )
             }
-            sendMessage(summary.message)
+            // 重试链路与主链路同一分派口径：未配置只由 UI 渲染一次（含「识别成功 N 张」等汇总信息）
+            dispatchOcrFailure(summary.message, summary.needsConfiguration)
         }
     }
 
@@ -337,6 +351,19 @@ class HomeworkEntryViewModel @Inject constructor(
         _uiState.update { it.copy(processing = true, formError = null) }
         recognitionJob = viewModelScope.launch {
             val outcome = recognize()
+            val needsConfiguration = when (outcome) {
+                is OcrOutcome.NeedsRetry -> outcome.needsConfiguration
+                is OcrOutcome.Failed -> outcome.needsConfiguration
+                is OcrOutcome.Filled -> false
+            }
+            val rawMessage = when (outcome) {
+                is OcrOutcome.NeedsRetry -> outcome.message
+                is OcrOutcome.Failed -> outcome.message
+                is OcrOutcome.Filled -> ""
+            }
+            // 表单内联错误（FormError 常驻渲染）与 Snackbar 必须同源：这里经 UI 的同一纯函数
+            // ocrNoticeFor 取值，学生侧因此不会残留「请到设置页…」，家长侧保留原文
+            val formError = failureFormError(rawMessage, needsConfiguration)
             _uiState.update { state ->
                 when (outcome) {
                     is OcrOutcome.Filled -> state.copy(
@@ -345,10 +372,12 @@ class HomeworkEntryViewModel @Inject constructor(
                         contentError = null,
                     )
 
+                    // 可重试失败不进表单内联错误（由待重试入口与提示承担），既有口径不变
                     is OcrOutcome.NeedsRetry -> state.copy(processing = false)
+                    // 未配置场景 formError 为 null：该提示由 Snackbar / 就地卡片专门承担（不重复提示）
                     is OcrOutcome.Failed -> state.copy(
                         processing = false,
-                        formError = outcome.message,
+                        formError = formError,
                     )
                 }
             }
@@ -359,16 +388,45 @@ class HomeworkEntryViewModel @Inject constructor(
                     sendMessage("识别完成，可继续修改内容")
                 }
 
-                is OcrOutcome.NeedsRetry -> sendMessage(outcome.message)
+                // 原文入参：Snackbar 文案与动作由 UI 的 ocrNoticeFor 一次性产出（不预先收敛）
+                is OcrOutcome.NeedsRetry -> dispatchOcrFailure(rawMessage, needsConfiguration)
 
-                is OcrOutcome.Failed -> {
-                    sendMessage(outcome.message)
-                    if (outcome.needsConfiguration) {
-                        // 引导用户去设置页配置 OCR 厂商参数（图片已登记待重试，配置后可直接重试）
-                        _events.send(HomeworkEntryEvent.NeedsOcrConfiguration(outcome.message))
-                    }
-                }
+                is OcrOutcome.Failed -> dispatchOcrFailure(rawMessage, needsConfiguration)
             }
+        }
+    }
+
+    /**
+     * 单条失败写入**表单内联错误**（FormError 常驻渲染）的文案；返回 null 表示本次不写内联错误。
+     *
+     * 「识别服务未配置」是唯一例外：该提示已由**专门的呈现通道**承担——家长是带「去设置」动作的
+     * Snackbar、学生是就地卡片；两条通道的正文**都取自 UI 的同一个渲染入口 [ocrNoticeFor]**
+     * （家长 = 底层原文且动作走 actionLabel、学生 = 请家长配置版本且保留「识别成功 N 张」等汇总信息）。
+     * 因此这里不再重复写 formError，否则学生会话同屏会出现两处「请家长配置」文字（卡片 + 常驻红字），
+     * 家长侧也会与 Snackbar 重复。
+     *
+     * 其余失败（网络/服务端/解析/未知、图片不可读等）仍按原文写入内联错误，口径不变。
+     */
+    private fun failureFormError(message: String, needsConfiguration: Boolean): String? =
+        if (needsConfiguration) null else message
+
+    /**
+     * 分发识别失败结果（**收敛只有单层**）：
+     *
+     * - 「识别服务未配置」：Snackbar 文案与「去设置」动作**只在 UI 的 [ocrNoticeFor] 一次性产出**，
+     *   因此这里只发 [HomeworkEntryEvent.NeedsOcrConfiguration]（携带底层原文）且**不再** [sendMessage]：
+     *   否则同一提示会由 ViewModel 与 UI 各渲染一条（各约 10 秒连弹两次），
+     *   或由两层各收敛一次导致家长文案出现重复的按钮说明。学生侧就地提示亦由该事件驱动。
+     * - 其余失败（网络/服务端/解析/未知、图片不可读等）：文案原样下发一次，不受角色影响。
+     *
+     * @param rawMessage 底层识别失败原文（重试链路可能是「识别成功 N 张，其余仍失败：…」汇总）
+     * @param needsConfiguration 失败原因是否为「识别服务未配置」（唯一需要角色分流的失败）
+     */
+    private suspend fun dispatchOcrFailure(rawMessage: String, needsConfiguration: Boolean) {
+        if (needsConfiguration) {
+            _events.send(HomeworkEntryEvent.NeedsOcrConfiguration(rawMessage))
+        } else {
+            sendMessage(rawMessage)
         }
     }
 
@@ -379,6 +437,9 @@ class HomeworkEntryViewModel @Inject constructor(
         }
         return if (current.isBlank()) addition else "$current\n$addition"
     }
+
+    /** 当前会话角色（唯一口径：会话初始化时写入的 [HomeworkEntryUiState.role]，不另立来源） */
+    private fun currentRole(): Role? = _uiState.value.role
 
     private fun resolveDeadline(state: HomeworkEntryUiState): DeadlineParse {
         val dateText = state.deadlineDate.trim()

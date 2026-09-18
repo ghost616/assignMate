@@ -31,6 +31,10 @@ import com.assignmate.app.homework.ui.HomeworkEntryRoute
 import com.assignmate.app.homework.ui.HomeworkListRoute
 import com.assignmate.app.homework.ui.HomeworkTemplateRoute
 import com.assignmate.app.homework.ui.HomeworkTimeSetRoute
+import com.assignmate.app.settings.ui.OcrConfigRoute
+import com.assignmate.app.settings.ui.SettingsDestination
+import com.assignmate.app.settings.ui.SettingsRoute
+import com.assignmate.app.settings.ui.ThemeSettingsRoute
 import com.assignmate.app.stats.ui.DaySummaryRoute
 import com.assignmate.app.stats.ui.HistoryRoute
 import com.assignmate.app.stats.ui.ItemDetailRoute
@@ -50,7 +54,8 @@ import javax.inject.Inject
  * - auth 六条路由：身份选择 / 家长登录 / 家长注册 / 学生进入 / 家长主界面 / 学生端首页；
  * - homework 四条路由：作业清单 / 录入入口（手动·拍照·相册·语音）/ 录入编辑模板 / 时间设定；
  * - timer 四条路由：作业执行（计时）/ 休息倒计时 / 下一项提示 / 完成反馈；
- * - stats 三条路由：当日盘点 / 单项详情 / 历史查询。
+ * - stats 三条路由：当日盘点 / 单项详情 / 历史查询；
+ * - settings 三条路由：设置主页 / OCR 厂商配置 / 护眼设置（三档主题）。
  *
  * 传参与解析约定：路径与查询参数统一以字符串注册，页面侧经各模块 Destination 的解析函数
  * （homework → [HomeworkDestination.studentIdOf] / [HomeworkDestination.homeworkIdOf]；
@@ -113,7 +118,18 @@ import javax.inject.Inject
  *   · [toStatsHistoryRange] 换范围同样先移除当前历史查询实例，栈中恒只有一个历史查询页；
  *   二级页（单项详情 / 历史查询）与盘点页「返回」统一 popBackStack 回上一级，三条入口都不产生回退环。
  *
- * settings 等后续模块在此增量注册。
+ * settings 设置链路（家长中心 / 学生首页 / 录入页三个入口，均为二级页）：
+ * - 家长中心「⚙ 设置」：[ParentHomeRoute] 的 `onOpenSettings()` → [SettingsDestination.HOME] 设置主页；
+ * - 学生首页「🌙 护眼设置」：[StudentHomeRoute] 的 `onOpenThemeSettings()` → [SettingsDestination.THEME] 护眼设置页；
+ * - 录入页「去设置」（识别服务未配置时的引导）：[HomeworkEntryRoute] 的 `onGoToOcrSettings()`
+ *   → [SettingsDestination.OCR_CONFIG] OCR 配置页；homework 内部按会话角色决定是否展示该入口
+ *   （家长会话才渲染按钮，学生会话就地提示「请让家长先配置识别服务」），framework 只统一注入跳转；
+ * - 主题偏好生效：护眼设置页选中档位即写入 core 的
+ *   [com.assignmate.app.core.domain.prefs.ThemePreferenceStore]，[MainActivity] 订阅该偏好后
+ *   按 [com.assignmate.app.settings.domain.EyeCareTheme.resolveDarkTheme] 口径决定 Material3 深浅配色，
+ *   故切换档位无需重启即时生效（本宿主不参与主题解析，只负责导航接线）。
+ *
+ * 后续模块（如更多 settings 子页）同样在此增量注册：路由常量由业务模块自行定义，本宿主只做接线。
  */
 @Composable
 fun AssignMateNavHost(
@@ -169,6 +185,8 @@ fun AssignMateNavHost(
                 onLoggedOut = { navController.toRoleSelect() },
                 // 家长选择某学生后进入其作业清单（携带该 studentId）
                 onEnterHomework = { studentId -> navController.toHomeworkList(studentId) },
+                // 「⚙ 设置」：进 settings 设置主页（二级页，返回键回本页）
+                onOpenSettings = { navController.toSettingsHome() },
             )
         }
         // ---- auth：学生端首页（学生进入成功或会话恢复后到达） ----
@@ -177,6 +195,8 @@ fun AssignMateNavHost(
                 onLoggedOut = { navController.toRoleSelect() },
                 // 学生进入自己的作业清单：交由清单页按当前学生会话解析（防越权）
                 onEnterHomework = { navController.toHomeworkList(AppDestination.UNSPECIFIED_STUDENT_ID) },
+                // 「🌙 护眼设置」：直达 settings 护眼设置页（家长与学生均可访问）
+                onOpenThemeSettings = { navController.toSettingsTheme() },
             )
         }
         // ---- homework：作业清单（家长：路由参数指定学生；学生：参数被忽略，按会话解析本人） ----
@@ -222,6 +242,9 @@ fun AssignMateNavHost(
                 studentId = entry.studentIdArg(),
                 onBack = { navController.popBackStack() },
                 onSaved = { navController.popBackStack() },
+                // 「去设置」引导：识别服务未配置时（家长会话）跳 OCR 配置页；
+                // 是否展示该入口由 homework 按会话角色决定，framework 只统一注入跳转
+                onGoToOcrSettings = { navController.toSettingsOcrConfig() },
             )
         }
         // ---- homework：录入/编辑模板（homeworkId 缺省 = 新建） ----
@@ -425,7 +448,31 @@ fun AssignMateNavHost(
                 )
             }
         }
-        // 预留注册点：settings 等业务路由
+        // ---- settings：设置主页（家长中心「⚙ 设置」入口；OCR 配置摘要 / 主题档位 / 数据清理） ----
+        composable(route = SettingsDestination.HOME) {
+            SettingsRoute(
+                // 二级页返回：popBackStack 回上一级（家长主界面 / 学生首页），不产生回退环
+                onBack = { navController.popBackStack() },
+                // 「识别设置」：仅家长会话在页面层渲染该入口，此处只承接跳转
+                onOpenOcrConfig = { navController.toSettingsOcrConfig() },
+                // 「护眼设置」：家长与学生均可进入
+                onOpenTheme = { navController.toSettingsTheme() },
+            )
+        }
+        // ---- settings：OCR 厂商配置页（家长会话可达；学生会话由页面层渲染拒绝态、不渲染输入框） ----
+        composable(route = SettingsDestination.OCR_CONFIG) {
+            OcrConfigRoute(
+                // 返回上一级：设置主页（由设置主页进入）或家长主界面（由录入页「去设置」直接进入）
+                onBack = { navController.popBackStack() },
+            )
+        }
+        // ---- settings：护眼设置页（三档主题，选中即写入 core 主题偏好并即时生效） ----
+        composable(route = SettingsDestination.THEME) {
+            ThemeSettingsRoute(
+                // 返回上一级：设置主页 / 家长主界面 / 学生首页
+                onBack = { navController.popBackStack() },
+            )
+        }
     }
 }
 
@@ -706,6 +753,30 @@ private fun StatsHistoryRangePickerDialog(
     ) {
         DateRangePicker(state = state)
     }
+}
+
+/**
+ * 进入 settings 设置主页（家长中心「⚙ 设置」）。
+ *
+ * 二级页语义：普通压栈（`[家长主界面, 设置主页]`），设置主页「返回」popBackStack 回家长主界面；
+ * 主页上的 OCR 配置 / 护眼设置再各压一层，返回键逐级回退，不产生回退环。
+ */
+private fun NavHostController.toSettingsHome() {
+    navigate(SettingsDestination.HOME)
+}
+
+/**
+ * 进入 settings OCR 厂商配置页。两个入口共用（设置主页「识别设置」、录入页「去设置」引导），
+ * 均为**普通压栈**（不 popUpTo）：返回键回到各自的上一级（设置主页 / 录入页），
+ * 不会把用户从录入流程中弹出到设置页、再返回时丢失已录入内容。
+ */
+private fun NavHostController.toSettingsOcrConfig() {
+    navigate(SettingsDestination.OCR_CONFIG)
+}
+
+/** 进入 settings 护眼设置页（学生首页「🌙 护眼设置」或设置主页「护眼设置」），返回键 popBackStack 回上一级。 */
+private fun NavHostController.toSettingsTheme() {
+    navigate(SettingsDestination.THEME)
 }
 
 /** 纪元日 → 该日 UTC 零点毫秒（Material3 日期选择器的时间基准）。 */

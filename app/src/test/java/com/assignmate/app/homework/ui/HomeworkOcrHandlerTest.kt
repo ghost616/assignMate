@@ -1,11 +1,11 @@
 package com.assignmate.app.homework.ui
 
 import com.assignmate.app.core.domain.ocr.OcrConfig
-import com.assignmate.app.core.domain.ocr.OcrConfigStore
 import com.assignmate.app.core.domain.ocr.OcrResult
 import com.assignmate.app.core.domain.ocr.PendingOcrStatus
 import com.assignmate.app.core.domain.ocr.PendingOcrTask
 import com.assignmate.app.homework.data.FakeHomeworkFileStore
+import com.assignmate.app.homework.data.FakeOcrConfigStore
 import com.assignmate.app.homework.data.FakeOcrRecognizer
 import com.assignmate.app.homework.data.FakePendingOcrRepository
 import com.assignmate.app.homework.data.ImageLoadResult
@@ -13,8 +13,6 @@ import com.assignmate.app.homework.data.MutableClock
 import com.assignmate.app.homework.domain.HomeworkConstants
 import java.io.File
 import java.nio.file.Files
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -278,6 +276,79 @@ class HomeworkOcrHandlerTest {
     }
 
     @Test
+    fun `重试撞上未配置时保留待重试并上抛未配置标记`() = runTest {
+        val path = localImage()
+        recognizer.enqueue(OcrResult.Failure.NetworkError())
+        handler().recognizeLocalImage(path)
+
+        recognizer.enqueue(OcrResult.Failure.NotConfigured())
+        val summary = handler().retryPendingTasks()
+
+        assertEquals(1, summary.attempted)
+        assertEquals(0, summary.succeeded)
+        // 未配置在重试链路仍属可重试：任务保持 PENDING、图片不丢，配置补齐后可直接重试
+        val task = pendingRepository.all().single()
+        assertEquals(PendingOcrStatus.PENDING, task.status)
+        assertEquals("未配置不累加重试计数（环境问题不是任务无救）", 0, task.retryCount)
+        assertTrue("配置补齐后重试依据的图片必须仍在", File(task.localImagePath).isFile)
+        assertTrue("未配置事实必须上抛，供调用方按会话角色收敛提示", summary.needsConfiguration)
+        assertTrue(summary.message.contains("设置页"))
+    }
+
+    @Test
+    fun `未配置反复重试达上限后任务与图片仍不得被清理`() = runTest {
+        val path = localImage()
+        recognizer.enqueue(OcrResult.Failure.NotConfigured())
+        handler().recognizeLocalImage(path)
+        val task = pendingRepository.all().single()
+
+        // 家长未配置期间连点重试：次数超过 MAX_OCR_RETRY_COUNT 也不得清理（图片必须留给配置补齐后重试）
+        val attempts = HomeworkConstants.MAX_OCR_RETRY_COUNT + 2
+        repeat(attempts) { recognizer.enqueue(OcrResult.Failure.NotConfigured()) }
+        repeat(attempts) { handler().retryPendingTasks() }
+
+        val remaining = pendingRepository.all()
+        assertEquals("未配置属可重试，反复重试后任务仍应保留", 1, remaining.size)
+        assertEquals(PendingOcrStatus.PENDING, remaining.single().status)
+        assertEquals("未配置始终不累加计数", 0, remaining.single().retryCount)
+        assertTrue("图片不得被清理", File(task.localImagePath).isFile)
+    }
+
+    @Test
+    fun `未配置期间反复重试后配置补齐仍可直接重试成功`() = runTest {
+        val path = localImage()
+        recognizer.enqueue(OcrResult.Failure.NotConfigured())
+        handler().recognizeLocalImage(path)
+        val task = pendingRepository.all().single()
+        repeat(HomeworkConstants.MAX_OCR_RETRY_COUNT + 2) {
+            recognizer.enqueue(OcrResult.Failure.NotConfigured())
+            handler().retryPendingTasks()
+        }
+
+        configStore.value = config.copy(apiKey = "configured")
+        recognizer.enqueue(OcrResult.Success(text = "配置后终于识别成功"))
+        val summary = handler().retryPendingTasks()
+
+        assertEquals(1, summary.succeeded)
+        assertEquals("配置后终于识别成功", summary.firstText)
+        assertTrue(pendingRepository.all().isEmpty())
+        assertFalse(File(task.localImagePath).exists())
+    }
+
+    @Test
+    fun `重试的可重试失败不误报未配置标记`() = runTest {
+        val path = localImage()
+        recognizer.enqueue(OcrResult.Failure.NetworkError())
+        handler().recognizeLocalImage(path)
+
+        recognizer.enqueue(OcrResult.Failure.NetworkError())
+        val summary = handler().retryPendingTasks()
+
+        assertEquals(PendingOcrStatus.PENDING, pendingRepository.all().single().status)
+        assertFalse("网络失败不得被当成未配置（否则文案会被错误分流）", summary.needsConfiguration)
+    }
+
+    @Test
     fun `未配置失败登记的任务在配置完成后可重试成功`() = runTest {
         val path = localImage()
         recognizer.enqueue(OcrResult.Failure.NotConfigured())
@@ -394,27 +465,5 @@ class HomeworkOcrHandlerTest {
 
         assertEquals(0, removed)
         assertEquals(3, fileStore.fileCount())
-    }
-}
-
-/** OCR 配置替身：返回可变配置，便于验证「配置补齐后可重试」链路 */
-private class FakeOcrConfigStore(initial: OcrConfig) : OcrConfigStore {
-
-    private val state = MutableStateFlow(initial)
-
-    var value: OcrConfig
-        get() = state.value
-        set(newValue) {
-            state.value = newValue
-        }
-
-    override val config: Flow<OcrConfig> = state
-
-    override suspend fun save(config: OcrConfig) {
-        state.value = config
-    }
-
-    override suspend fun clear() {
-        state.value = OcrConfig()
     }
 }

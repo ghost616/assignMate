@@ -33,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -41,20 +42,26 @@ import com.assignmate.app.auth.domain.Student
 import com.assignmate.app.core.ui.components.AssignMateBigButton
 import com.assignmate.app.core.ui.components.CoreEmptyPlaceholder
 import com.assignmate.app.core.ui.components.CoreLoadingPlaceholder
+import com.assignmate.app.core.ui.theme.AssignMateTheme
+import java.time.Instant
 
 /**
  * 家长主界面：学生档案卡片列表 + 添加（≤5 拦截）+ 改名 + 重置/修改验证码 +
- * 删除确认 + “进入某学生作业界面”。
+ * 删除确认 + “进入某学生作业界面” + 标题区「设置」入口。
  *
  * @param onEnterHomework 进入某学生作业界面：回调携带被选学生 id（家长会话本身无 studentId，
  *   必须显式传递），由 NavHost 以 studentId 参数导航到 homework 作业清单；
  *   默认空实现，保证既有接线（framework NavHost 旧调用点）继续编译通过。
+ * @param onOpenSettings 打开设置页：仅暴露导航意图（本模块不依赖 settings 实现，
+ *   亦不 import settings 包），由 NavHost 注入 settings 路由的跳转；
+ *   默认空实现，未接线时点「设置」为无操作，不崩溃。
  */
 @Composable
 fun ParentHomeRoute(
     onSessionExpired: () -> Unit,
     onLoggedOut: () -> Unit,
     onEnterHomework: (Long) -> Unit = {},
+    onOpenSettings: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: ParentHomeViewModel = hiltViewModel(),
 ) {
@@ -93,6 +100,7 @@ fun ParentHomeRoute(
         onCodeDismiss = viewModel::onCodeDismiss,
         onEnterHomework = viewModel::onEnterHomework,
         onLogout = viewModel::onLogoutClick,
+        onOpenSettings = onOpenSettings,
     )
     Scaffold(
         modifier = modifier,
@@ -128,6 +136,34 @@ class ParentHomeActions(
     val onCodeDismiss: () -> Unit,
     val onEnterHomework: (Student) -> Unit,
     val onLogout: () -> Unit,
+    /** 打开设置页：导航意图回调（settings 实现在其自身模块，本模块不感知） */
+    val onOpenSettings: () -> Unit = {},
+)
+
+/**
+ * 家长主界面动作集的默认实现：所有回调均为空实现，
+ * 用于「未接线导航」场景（预览、无参数渲染、旧调用点）下渲染家长中心。
+ */
+fun parentHomeActionsDefault(): ParentHomeActions = ParentHomeActions(
+    onAddClick = {},
+    onAddNameChange = {},
+    onAddConfirm = {},
+    onAddDismiss = {},
+    onRenameClick = {},
+    onRenameNameChange = {},
+    onRenameConfirm = {},
+    onRenameDismiss = {},
+    onDeleteClick = {},
+    onDeleteConfirm = {},
+    onDeleteDismiss = {},
+    onCodeClick = {},
+    onCodeInputChange = {},
+    onRegenerateCode = {},
+    onSaveCustomCode = {},
+    onCodeDismiss = {},
+    onEnterHomework = {},
+    onLogout = {},
+    onOpenSettings = {},
 )
 
 /** 家长主界面内容（无状态） */
@@ -141,12 +177,26 @@ fun ParentHomeContent(
         modifier = modifier.padding(horizontal = 20.dp),
     ) {
         Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            text = "家长中心",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onBackground,
-        )
+        // 标题区：左侧标题 + 右侧「设置」入口（导航意图由 framework 注入，本模块不感知 settings 实现）
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "家长中心",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = actions.onOpenSettings) {
+                Text(
+                    text = "⚙ 设置",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = "共 ${uiState.students.size} 名学生（最多 ${AuthConstants.MAX_STUDENTS} 名）",
@@ -433,4 +483,28 @@ private fun CodeDialog(
             }
         },
     )
+}
+
+/** 家长中心预览：用默认动作集渲染，便于查看标题区「设置」入口与卡片布局 */
+@Preview(showBackground = true)
+@Composable
+private fun ParentHomeContentPreview() {
+    AssignMateTheme {
+        ParentHomeContent(
+            uiState = ParentHomeUiState(
+                loading = false,
+                parentId = 1L,
+                students = listOf(
+                    Student(
+                        id = 10L,
+                        parentAccountId = 1L,
+                        name = "小明",
+                        verificationCode = "123456",
+                        createdAt = Instant.EPOCH,
+                    ),
+                ),
+            ),
+            actions = parentHomeActionsDefault(),
+        )
+    }
 }

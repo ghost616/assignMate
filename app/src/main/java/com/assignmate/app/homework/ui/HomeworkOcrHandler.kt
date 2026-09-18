@@ -56,7 +56,7 @@ class HomeworkOcrHandler @Inject constructor(
             }
         }
 
-    /** 识别图片字节（拍照后已在内存中的场景，无本地文件需清理） */
+    /** 图片读取走文件存储入口：识别图片字节（拍照后已在内存中的场景，无本地文件需清理） */
     suspend fun recognize(image: OcrImage): OcrOutcome =
         when (val result = recognizeImage(image)) {
             is OcrResult.Success -> OcrOutcome.Filled(result.text)
@@ -72,9 +72,13 @@ class HomeworkOcrHandler @Inject constructor(
      * - 图片丢失：清理任务并提示重新拍照；
      * - 识别成功：回填文本、清理任务与图片；
      * - 仍可重试失败：任务置回 PENDING 并累加重试计数；
+     * - **未配置（[OcrOutcome.NeedsRetry.needsConfiguration]）：任务置回 PENDING 但
+     *   不累加重试计数**——配置缺失是环境问题、不是任务无救，若累加则家长未配置期间反复
+     *   重试会触顶触发清理从而丢掉用户图片（图片必须在配置补齐后仍可直接重试）；
      * - 不可重试失败：任务置 FAILED 并累加计数（下次仍可手动重试，计数超限后自动清理）。
      *
-     * @return 重试汇总（成功条数 + 首条成功文本 + 提示信息），供 UI 回填与提示
+     * @return 重试汇总（成功条数 + 首条成功文本 + 提示信息 + 是否因未配置失败），供 UI 回填与提示；
+     *         调用方据此把「未配置」提示按会话角色收敛（学生无权去设置页，见 UI 层引导分流）
      */
     suspend fun retryPendingTasks(): OcrRetrySummary {
         val tasks = pendingOcrRepository.loadByStatus(PendingOcrStatus.PENDING) +
@@ -91,9 +95,11 @@ class HomeworkOcrHandler @Inject constructor(
         var firstText: String? = null
         var lastFailureHint: String? = null
         var cleaned = 0
+        var needsConfiguration = false
         tasks.forEach { task ->
             if (task.retryCount >= HomeworkConstants.MAX_OCR_RETRY_COUNT) {
                 // 重试次数超上限：任务无救，清理任务与图片，避免永久滞留与存储增长
+                // （「未配置」失败不累加计数，故不会因反复重试触发这里而丢用户图片）
                 pendingOcrRepository.remove(task.id)
                 fileStore.delete(task.localImagePath)
                 cleaned++
@@ -118,13 +124,29 @@ class HomeworkOcrHandler @Inject constructor(
                 }
 
                 is OcrOutcome.NeedsRetry -> {
-                    pendingOcrRepository.updateStatus(task.id, PendingOcrStatus.PENDING, task.retryCount + 1)
+                    // 「未配置」不累加重试计数：配置缺失是环境问题、不是任务无救，
+                    // 否则家长未配置期间反复重试会触顶触发清理，把用户图片删掉
+                    // （与「未配置…图片保留、配置补齐后可直接重试」的约定冲突）。
+                    val nextRetryCount = if (outcome.needsConfiguration) {
+                        task.retryCount
+                    } else {
+                        task.retryCount + 1
+                    }
+                    pendingOcrRepository.updateStatus(task.id, PendingOcrStatus.PENDING, nextRetryCount)
                     lastFailureHint = outcome.message
+                    // 未配置这一事实必须上抛，调用方才能按会话角色收敛提示文案
+                    if (outcome.needsConfiguration) {
+                        needsConfiguration = true
+                    }
                 }
 
                 is OcrOutcome.Failed -> {
                     pendingOcrRepository.updateStatus(task.id, PendingOcrStatus.FAILED, task.retryCount + 1)
                     lastFailureHint = outcome.message
+                    // 未配置会让整批重试都停在同一条「去设置页」文案上，需向调用方暴露以按角色收敛提示
+                    if (outcome.needsConfiguration) {
+                        needsConfiguration = true
+                    }
                 }
             }
         }
@@ -140,6 +162,7 @@ class HomeworkOcrHandler @Inject constructor(
             succeeded = succeeded,
             firstText = firstText,
             message = message,
+            needsConfiguration = needsConfiguration,
         )
     }
 
@@ -174,13 +197,20 @@ class HomeworkOcrHandler @Inject constructor(
     /**
      * 重试链路专用识别：只做「识别 + 结果分类」，**不再次登记待重试任务**
      * （任务已存在，重复登记会产生重复项）。
+     *
+     * 注意 [OcrResult.Failure.NotConfigured]：在重试链路它同样属「可重试」（任务保持 PENDING），
+     * 但必须把「未配置」标记随 [OcrOutcome.NeedsRetry.needsConfiguration] 一起带出，
+     * 否则调用方无从判断该把提示按会话角色收敛（家长去设置页 / 学生请家长配置）。
      */
     private suspend fun recognizeForRetry(task: PendingOcrTask): OcrOutcome =
         when (val loaded = fileStore.loadImage(task.localImagePath)) {
             is ImageLoadResult.Loaded -> when (val result = recognizeImage(loaded.image)) {
                 is OcrResult.Success -> OcrOutcome.Filled(result.text)
                 is OcrResult.Failure -> if (shouldRegisterRetry(result)) {
-                    OcrOutcome.NeedsRetry(failureHint(result))
+                    OcrOutcome.NeedsRetry(
+                        message = failureHint(result),
+                        needsConfiguration = result is OcrResult.Failure.NotConfigured,
+                    )
                 } else {
                     OcrOutcome.Failed(failureHint(result), result is OcrResult.Failure.NotConfigured)
                 }
@@ -309,8 +339,16 @@ sealed interface OcrOutcome {
     /** 识别成功：携带可编辑文本，由 UI 回填内容输入框 */
     data class Filled(val text: String) : OcrOutcome
 
-    /** 可重试失败：图片已落盘并登记待重试任务 */
-    data class NeedsRetry(val message: String) : OcrOutcome
+    /**
+     * 可重试失败：图片已落盘并登记待重试任务。
+     *
+     * @property needsConfiguration 失败原因是「识别服务未配置」：提示需按会话角色分流
+     *   （家长可被引导去设置页，学生只能请家长配置），调用方据此选择文案
+     */
+    data class NeedsRetry(
+        val message: String,
+        val needsConfiguration: Boolean = false,
+    ) : OcrOutcome
 
     /** 不可重试失败：仅提示 */
     data class Failed(val message: String, val needsConfiguration: Boolean) : OcrOutcome
@@ -322,4 +360,9 @@ data class OcrRetrySummary(
     val succeeded: Int,
     val firstText: String?,
     val message: String,
+    /**
+     * 本次重试是否因「识别服务未配置」失败：调用方据此把提示按会话角色收敛
+     * （家长可被引导去设置页，学生只能请家长配置），未配置之外的失败不受影响。
+     */
+    val needsConfiguration: Boolean = false,
 )

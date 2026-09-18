@@ -1,6 +1,7 @@
 package com.assignmate.app.homework.data
 
 import com.assignmate.app.core.domain.ocr.OcrConfig
+import com.assignmate.app.core.domain.ocr.OcrConfigStore
 import com.assignmate.app.core.domain.ocr.OcrImage
 import com.assignmate.app.core.domain.ocr.OcrRecognizer
 import com.assignmate.app.core.domain.ocr.OcrResult
@@ -13,8 +14,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
 
 /**
- * homework 录入链路的测试替身集合：文件存储、OCR 识别、待重试任务仓库。
- * 全部为纯 JVM 实现（不依赖 Android），保证 OCR 失败分派、待重试登记/清理可确定性单测。
+ * homework 录入链路的测试替身集合：文件存储、OCR 识别与配置、待重试任务仓库。
+ * 全部为纯 JVM 实现（不依赖 Android），保证 OCR 失败分派、待重试登记/清理、识别缓存清理可确定性单测。
  */
 
 /**
@@ -174,6 +175,36 @@ class FakePendingOcrRepository : PendingOcrRepository {
         revision.value += 1
     }
 
+    /** 清空识别缓存：删除全部状态的任务并返回其图片路径（与 Room 实现口径一致） */
+    override suspend fun clearAll(): Set<String> {
+        val paths = rows.mapTo(mutableSetOf<String>()) { it.localImagePath }
+        rows.clear()
+        revision.value += 1
+        return paths
+    }
+
     /** 测试断言辅助：全部任务快照 */
     fun all(): List<PendingOcrTask> = rows.toList()
+}
+
+/** OCR 配置替身：返回可变配置，便于验证「配置补齐后可重试」链路 */
+class FakeOcrConfigStore(initial: OcrConfig) : OcrConfigStore {
+
+    private val state = MutableStateFlow(initial)
+
+    var value: OcrConfig
+        get() = state.value
+        set(newValue) {
+            state.value = newValue
+        }
+
+    override val config: Flow<OcrConfig> = state
+
+    override suspend fun save(config: OcrConfig) {
+        state.value = config
+    }
+
+    override suspend fun clear() {
+        state.value = OcrConfig()
+    }
 }

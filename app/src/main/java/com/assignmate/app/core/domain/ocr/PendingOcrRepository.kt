@@ -1,4 +1,4 @@
-﻿package com.assignmate.app.core.domain.ocr
+package com.assignmate.app.core.domain.ocr
 
 import kotlinx.coroutines.flow.Flow
 
@@ -53,4 +53,16 @@ interface PendingOcrRepository {
 
     /** 删除任务（图片文件清理由调用方负责） */
     suspend fun remove(id: Long)
+
+    /**
+     * 清空识别缓存：删除全部待重试任务记录（**覆盖 [PendingOcrStatus] 的全部 4 种状态**：
+     * PENDING / PROCESSING / SUCCEEDED / FAILED，而非仅未完成的 PENDING/PROCESSING），
+     * 并返回本次被清理记录所引用的图片本地路径集合，供调用方删除图片文件。
+     *
+     * 语义约定：
+     * - 空表返回空集合且不报错（幂等，可反复调用）；
+     * - 返回值与库内被清理的记录严格一致（同一事务内「先取回、后清空」）；
+     * - 只清理记录，不碰文件系统：图片删除由 core.domain.ocr 的图片清理抽象负责。
+     */
+    suspend fun clearAll(): Set<String>
 }

@@ -27,16 +27,20 @@ import com.assignmate.app.core.ui.components.CoreLoadingPlaceholder
 import com.assignmate.app.core.ui.theme.AssignMateTheme
 
 /**
- * 学生端首页：展示“当前学生姓名/家长账号归属”等会话信息，并提供“进入我的作业”入口
+ * 学生端首页：展示“当前学生姓名/家长账号归属”等会话信息，并提供“进入我的作业”“护眼设置”入口
  * 与退出登录（回身份选择页）。
  *
  * @param onEnterHomework 进入我的作业：导航侧使用当前学生会话的 studentId 打开 homework
  *   作业清单（学生会话由“家长账号 + 验证码”进入时写入）；默认空实现，保证既有接线兼容。
+ * @param onOpenThemeSettings 打开护眼设置：仅暴露导航意图（本模块不依赖 settings 实现，
+ *   亦不 import settings 包），由 NavHost 注入 settings 路由的跳转；
+ *   默认空实现，未接线时点「护眼设置」为无操作，不崩溃。
  */
 @Composable
 fun StudentHomeRoute(
     onLoggedOut: () -> Unit,
     onEnterHomework: () -> Unit = {},
+    onOpenThemeSettings: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: StudentHomeViewModel = hiltViewModel(),
 ) {
@@ -50,18 +54,38 @@ fun StudentHomeRoute(
     }
     StudentHomeContent(
         uiState = uiState,
-        onLogout = viewModel::onLogoutClick,
-        onEnterHomework = onEnterHomework,
+        actions = StudentHomeActions(
+            onLogout = viewModel::onLogoutClick,
+            onEnterHomework = onEnterHomework,
+            onOpenThemeSettings = onOpenThemeSettings,
+        ),
         modifier = modifier,
     )
 }
+
+/**
+ * 学生端首页动作集（避免内容函数参数过长）：
+ * 「进入我的作业」「护眼设置」「退出登录」三个入口均只承载导航/会话意图。
+ */
+class StudentHomeActions(
+    val onLogout: () -> Unit,
+    val onEnterHomework: () -> Unit,
+    /** 打开护眼设置：导航意图回调（settings 实现在其自身模块，本模块不感知） */
+    val onOpenThemeSettings: () -> Unit = {},
+)
+
+/** 学生端首页动作集的默认实现：全部空实现，用于预览与未接线渲染（点击无操作、不崩溃） */
+fun studentHomeActionsDefault(): StudentHomeActions = StudentHomeActions(
+    onLogout = {},
+    onEnterHomework = {},
+    onOpenThemeSettings = {},
+)
 
 /** 学生端首页内容（无状态） */
 @Composable
 fun StudentHomeContent(
     uiState: StudentHomeUiState,
-    onLogout: () -> Unit,
-    onEnterHomework: () -> Unit,
+    actions: StudentHomeActions,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -90,7 +114,7 @@ fun StudentHomeContent(
                 Spacer(modifier = Modifier.height(24.dp))
                 AssignMateBigButton(
                     text = "退出并返回身份选择",
-                    onClick = onLogout,
+                    onClick = actions.onLogout,
                     containerColor = MaterialTheme.colorScheme.secondary,
                 )
             }
@@ -144,13 +168,20 @@ fun StudentHomeContent(
                 Spacer(modifier = Modifier.height(16.dp))
                 AssignMateBigButton(
                     text = "📚 进入我的作业",
-                    onClick = onEnterHomework,
+                    onClick = actions.onEnterHomework,
                     containerColor = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                // 护眼设置入口：与「进入我的作业」并列，仅回调导航意图（settings 实现不在本模块）
+                AssignMateBigButton(
+                    text = "🌙 护眼设置",
+                    onClick = actions.onOpenThemeSettings,
+                    containerColor = MaterialTheme.colorScheme.tertiary,
                 )
                 Spacer(modifier = Modifier.height(24.dp))
                 AssignMateBigButton(
                     text = "退出登录",
-                    onClick = onLogout,
+                    onClick = actions.onLogout,
                     containerColor = MaterialTheme.colorScheme.secondary,
                 )
             }
@@ -169,8 +200,7 @@ private fun StudentHomeContentPreview() {
                 studentId = 10L,
                 studentName = "小明",
             ),
-            onLogout = {},
-            onEnterHomework = {},
+            actions = studentHomeActionsDefault(),
         )
     }
 }
