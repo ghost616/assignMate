@@ -2,12 +2,14 @@ package com.assignmate.app.stats.ui
 
 import com.assignmate.app.auth.domain.Role
 import com.assignmate.app.auth.domain.SessionState
+import com.assignmate.app.core.domain.homework.HomeworkDayStatus
 import com.assignmate.app.stats.data.StatsFailure
 import com.assignmate.app.stats.data.StatsRepository
 import com.assignmate.app.stats.data.StatsResult
 import com.assignmate.app.stats.domain.DaySummary
 import com.assignmate.app.stats.domain.DifficultyLevel
 import com.assignmate.app.stats.domain.HistoryQuery
+import com.assignmate.app.stats.domain.StageProgress
 import com.assignmate.app.stats.domain.StatsCalculations
 import com.assignmate.app.stats.domain.StatsConstants
 import java.lang.reflect.Modifier
@@ -56,7 +58,9 @@ class StatsUiContractTest {
 
     @Test
     fun `单项详情路由包含学生与作业`() {
+        // 路由模板保持两段路径不变：日期参数若进路由需 framework 补占位符 + navArgument（属 framework 计划）
         assertEquals("stats/item/2/7", StatsDestination.itemDetailRoute(2L, 7L))
+        assertEquals("stats/item/{studentId}/{homeworkId}", StatsDestination.ITEM_DETAIL)
     }
 
     @Test
@@ -231,7 +235,7 @@ class StatsUiContractTest {
         assertTrue(today.isToday)
         assertEquals("正在盘点今天的作业…", today.loadingText)
         assertEquals("今天的作业盘点", today.titleText)
-        assertEquals("今天动过的作业（2 项）", today.itemListTitle)
+        assertEquals("今天要做的作业（2 项）", today.itemListTitle)
         assertEquals(StatsErrorMessages.NO_DATA_TODAY, today.emptyText)
 
         val history = DaySummaryUiState(
@@ -244,7 +248,7 @@ class StatsUiContractTest {
         // 加载态、页面标题、清单卡标题、空态四处共用同一 isToday 分支，不出现「今天 / 这一天」混用
         assertEquals("正在盘点 2023-11-13 的作业…", history.loadingText)
         assertEquals("2023-11-13 的作业盘点", history.titleText)
-        assertEquals("这一天动过的作业（2 项）", history.itemListTitle)
+        assertEquals("这一天要做的作业（2 项）", history.itemListTitle)
         assertEquals(StatsErrorMessages.NO_DATA, history.emptyText)
     }
 
@@ -257,19 +261,93 @@ class StatsUiContractTest {
         assertEquals(StatsErrorMessages.ESTIMATED_UNSET, state.estimatedText)
         assertEquals(StatsErrorMessages.NOT_STARTED, state.elapsedText)
         assertEquals(StatsErrorMessages.NOT_STARTED, state.pausedText)
-        assertEquals("0 次", state.sessionCountText)
+        assertNull(state.stageProgressText)
         assertEquals("", state.difficultyLabel)
         assertEquals(StatsErrorMessages.NOT_STARTED, state.assessmentHint)
         assertFalse(state.hasExecution)
+        // 首帧日期尚未解析（哨兵 -1）：按「今天」口径渲染，与既有行为一致
+        assertTrue(state.isToday)
+        assertEquals("正在读取今天的用时…", state.loadingText)
+        assertEquals("今天的用时情况", state.timeCardTitle)
+    }
+
+    @Test
+    fun `单项详情文案随今天与历史日收敛`() {
+        val today = ItemDetailUiState(
+            epochDay = DAY_EPOCH,
+            todayEpochDay = DAY_EPOCH,
+            detail = itemDetailResult(epochDay = DAY_EPOCH),
+        )
+        assertTrue(today.isToday)
+        assertEquals("正在读取今天的用时…", today.loadingText)
+        assertEquals("今天的用时情况", today.timeCardTitle)
+        assertEquals("只统计今天的用时（阶段作业每天分别计算）", today.noteText)
+
+        val history = ItemDetailUiState(
+            epochDay = DAY_EPOCH - 1,
+            todayEpochDay = DAY_EPOCH,
+            detail = itemDetailResult(epochDay = DAY_EPOCH - 1),
+        )
+        assertFalse(history.isToday)
+        assertEquals("2023-11-13", history.dateText)
+        // 三处文案共用同一日期口径分支：历史日不出现「今天」措辞
+        listOf(history.loadingText, history.timeCardTitle, history.noteText).forEach { text ->
+            assertFalse("历史日文案不应出现「今天」措辞：$text", text.contains("今天"))
+        }
+        assertTrue(history.timeCardTitle.startsWith(history.dateText))
+    }
+
+    @Test
+    fun `单项详情阶段打卡进度文案与当天状态并存`() {
+        val stage = ItemDetailUiState(
+            epochDay = DAY_EPOCH,
+            todayEpochDay = DAY_EPOCH,
+            detail = itemDetailResult(
+                isStage = true,
+                dayStatus = HomeworkDayStatus.IN_PROGRESS,
+                stageProgress = StageProgress(homeworkId = 1L, content = "背单词", doneDays = 3, totalDays = 7),
+            ),
+        )
+        assertEquals("进行中", stage.statusText)
+        assertEquals("阶段打卡 3/7 天", stage.stageProgressText)
+    }
+
+    // ---- 文案映射：当天状态与阶段打卡进度 ----
+
+    @Test
+    fun `当天状态文案覆盖全部取值且互不相同`() {
+        val labels = HomeworkDayStatus.entries.map { StatsErrorMessages.dayStatusLabel(it) }
+        assertEquals(HomeworkDayStatus.entries.size, labels.distinct().size)
+        labels.forEach { assertTrue(it.isNotBlank()) }
+        assertEquals("已完成", StatsErrorMessages.dayStatusLabel(HomeworkDayStatus.COMPLETED))
+        assertEquals("还没开始", StatsErrorMessages.dayStatusLabel(HomeworkDayStatus.NOT_STARTED))
+        assertEquals("进行中", StatsErrorMessages.dayStatusLabel(HomeworkDayStatus.IN_PROGRESS))
+        assertEquals("当天没做完", StatsErrorMessages.dayStatusLabel(HomeworkDayStatus.MISSED))
+    }
+
+    @Test
+    fun `阶段打卡进度文案按完成天数与总天数生成`() {
+        assertEquals(
+            "阶段打卡 0/7 天",
+            StatsErrorMessages.stageProgressText(
+                StageProgress(homeworkId = 1L, content = "背单词", doneDays = 0, totalDays = 7),
+            ),
+        )
+        assertEquals(
+            "阶段打卡 7/7 天",
+            StatsErrorMessages.stageProgressText(
+                StageProgress(homeworkId = 1L, content = "背单词", doneDays = 7, totalDays = 7),
+            ),
+        )
     }
 
     @Test
     fun `困难度等级标签与提示口径一致`() {
-        val slow = ItemDetailUiState(detail = itemDetail(difficulty = DifficultyLevel.SLOW))
+        val slow = ItemDetailUiState(detail = itemDetailResult(difficulty = DifficultyLevel.SLOW))
         assertEquals("偏慢", slow.difficultyLabel)
         assertTrue(DifficultyLevel.SLOW.needsAttention)
 
-        val smooth = ItemDetailUiState(detail = itemDetail(difficulty = DifficultyLevel.SMOOTH))
+        val smooth = ItemDetailUiState(detail = itemDetailResult(difficulty = DifficultyLevel.SMOOTH))
         assertEquals("很顺利", smooth.difficultyLabel)
         assertFalse(DifficultyLevel.SMOOTH.needsAttention)
     }

@@ -133,7 +133,14 @@ class TimerDomainBoundaryTest {
     fun `未排定时间且无 deadline 的作业永不判超时`() {
         val homework = timerTestHomework(id = 1L)
 
-        assertFalse(TimerCalculations.isHomeworkOverdue(homework, session = null, nowMillis = BASE + 100 * DAY))
+        assertFalse(
+            TimerCalculations.isHomeworkOverdue(
+                homework,
+                session = null,
+                nowMillis = BASE + 100 * DAY,
+                zoneId = TimerTestEnv.ZONE,
+            ),
+        )
     }
 
     @Test

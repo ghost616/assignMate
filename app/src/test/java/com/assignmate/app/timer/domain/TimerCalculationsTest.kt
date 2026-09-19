@@ -207,16 +207,44 @@ class TimerCalculationsTest {
         val finishedLate = session(finishedAtMillis = BASE + 15 * MINUTE)
         val finishedEarly = session(finishedAtMillis = BASE + 5 * MINUTE)
 
-        assertTrue(TimerCalculations.isHomeworkOverdue(homework, finishedLate, nowMillis = BASE + HOUR))
-        assertFalse(TimerCalculations.isHomeworkOverdue(homework, finishedEarly, nowMillis = BASE + HOUR))
+        assertTrue(
+            TimerCalculations.isHomeworkOverdue(
+                homework,
+                finishedLate,
+                nowMillis = BASE + HOUR,
+                zoneId = TimerTestEnv.ZONE,
+            ),
+        )
+        assertFalse(
+            TimerCalculations.isHomeworkOverdue(
+                homework,
+                finishedEarly,
+                nowMillis = BASE + HOUR,
+                zoneId = TimerTestEnv.ZONE,
+            ),
+        )
     }
 
     @Test
     fun `未开始计时的作业以当前时刻判定是否超时`() {
         val homework = timerTestHomework(id = 1L, startTimeMillis = BASE, estimatedMinutes = 10)
 
-        assertFalse(TimerCalculations.isHomeworkOverdue(homework, session = null, nowMillis = BASE + 5 * MINUTE))
-        assertTrue(TimerCalculations.isHomeworkOverdue(homework, session = null, nowMillis = BASE + 11 * MINUTE))
+        assertFalse(
+            TimerCalculations.isHomeworkOverdue(
+                homework,
+                session = null,
+                nowMillis = BASE + 5 * MINUTE,
+                zoneId = TimerTestEnv.ZONE,
+            ),
+        )
+        assertTrue(
+            TimerCalculations.isHomeworkOverdue(
+                homework,
+                session = null,
+                nowMillis = BASE + 11 * MINUTE,
+                zoneId = TimerTestEnv.ZONE,
+            ),
+        )
     }
 
     // ---- 4. 下一项选取 ----

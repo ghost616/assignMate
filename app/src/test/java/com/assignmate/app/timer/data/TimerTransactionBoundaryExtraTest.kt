@@ -103,6 +103,7 @@ class TimerTransactionBoundaryExtraTest {
             authRepository = env.authRepository,
             clock = env.clock,
             transactionRunner = env.transactionRunner,
+            dailyRecordRepository = env.dailyRecordRepository,
         )
         val session = (repository.startSession(homework.id, Role.STUDENT) as TimerStartResult.Success).session
         env.advance(30_000L)
@@ -125,6 +126,8 @@ class TimerTransactionBoundaryExtraTest {
         PauseRecordEntity(
             sessionId = sessionId,
             homeworkId = homeworkId,
+            // 脏行（历史中断遗留）按「未指定」哨兵 0 显式构造；实体已无 Kotlin 默认值
+            epochDay = 0L,
             pauseStartAt = Instant.ofEpochMilli(startMillis),
         )
 

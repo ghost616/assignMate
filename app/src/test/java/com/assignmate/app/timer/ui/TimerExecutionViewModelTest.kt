@@ -257,6 +257,7 @@ class TimerExecutionViewModelTest {
             authRepository = env.authRepository,
             clock = env.clock,
             transactionRunner = env.transactionRunner,
+            dailyRecordRepository = env.dailyRecordRepository,
         )
         val ticker = FakeTickerController()
         val viewModel = track(
@@ -271,6 +272,7 @@ class TimerExecutionViewModelTest {
                 overduePromptStore = env.overduePromptStore,
                 permissionChecker = env.permissionChecker,
                 clock = env.clock,
+                zoneId = TimerTestEnv.ZONE,
             ),
         )
         val events = mutableListOf<TimerExecutionEvent>()
@@ -465,6 +467,7 @@ class TimerExecutionViewModelTest {
         overduePromptStore = env.overduePromptStore,
         permissionChecker = env.permissionChecker,
         clock = env.clock,
+        zoneId = TimerTestEnv.ZONE,
     )
 
     /** 经仓库落库开始计时（学生会话本人名下作业） */

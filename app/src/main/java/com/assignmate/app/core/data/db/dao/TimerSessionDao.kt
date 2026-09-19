@@ -1,4 +1,4 @@
-﻿package com.assignmate.app.core.data.db.dao
+package com.assignmate.app.core.data.db.dao
 
 import androidx.room.Dao
 import androidx.room.Query
@@ -40,6 +40,16 @@ interface TimerSessionDao : BaseDao<TimerSessionEntity> {
             "ORDER BY started_at ASC",
     )
     suspend fun loadByStudentAndStatus(studentId: Long, status: String): List<TimerSessionEntity>
+
+    /**
+     * 按作业 + 业务自然日查询会话（按开始时刻升序），供「某作业某天的计时执行」逐日聚合。
+     * epochDay 由调用方按业务时区折算后传入（禁止 UTC 毫秒折算）。
+     */
+    @Query(
+        "SELECT * FROM timer_session WHERE homework_id = :homeworkId AND epoch_day = :epochDay " +
+            "ORDER BY started_at ASC",
+    )
+    suspend fun loadByHomeworkAndDay(homeworkId: Long, epochDay: Long): List<TimerSessionEntity>
 
     /** 按主键查询（返回 null 表示不存在） */
     @Query("SELECT * FROM timer_session WHERE id = :id LIMIT 1")

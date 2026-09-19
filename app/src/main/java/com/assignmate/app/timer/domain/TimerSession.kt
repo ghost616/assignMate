@@ -26,6 +26,14 @@ data class TimerSession(
     val pauseCount: Int = 0,
     /** 会话阶段：RUNNING / PAUSED / FINISHED */
     val phase: TimerPhase,
+    /**
+     * 归属的**业务自然日**（epochDay）：以**会话开始时刻**所在的业务自然日为准，
+     * 跨过午夜的计时仍计入开始那一天（第二天开始的新会话才落到第二天）。
+     *
+     * [TimerConstants.UNSPECIFIED_EPOCH_DAY]（0）表示「未指定」——仅出现于 v4 旧库经
+     * ALTER TABLE 加列后遗留的历史行；仓库层遇到该值会按会话开始时刻重新折算后使用。
+     */
+    val epochDay: Long = TimerConstants.UNSPECIFIED_EPOCH_DAY,
 ) {
 
     /** 会话是否未收尾（进行中或暂停中） */
@@ -52,6 +60,11 @@ data class PauseRecord(
     val pauseStartAt: Instant,
     /** 暂停结束时刻；仍处于暂停中时为 null */
     val pauseEndAt: Instant? = null,
+    /**
+     * 归属的**业务自然日**（epochDay）：与所属会话保持一致（取会话开始时刻所在自然日），
+     * 因此跨过午夜的暂停仍归属到会话开始那一天，不会分裂到两天。
+     */
+    val epochDay: Long = TimerConstants.UNSPECIFIED_EPOCH_DAY,
 ) {
 
     /** 是否为未结束（进行中）的暂停 */

@@ -8,8 +8,11 @@ import java.time.Period
  * 阶段作业范围：一周 / 两周 / 三周 / 一个月。
  *
  * 仅 [HomeworkType.STAGE] 作业使用；[days] 为「从起始日算起覆盖的自然天数」
- * （一周 7 天、一个月按 [HomeworkConstants.DAYS_PER_MONTH] 折算），
- * 由 UI/用例层据此把阶段模板展开成逐日的作业项（每天一条、可独立完成）。
+ * （一周 7 天、一个月按 [HomeworkConstants.DAYS_PER_MONTH] 折算）。
+ *
+ * 用途（**不再用于展开条目数**）：阶段作业在清单里始终只产出 **1 条**作业项，
+ * [days] 只用于 (1) 计算阶段起止日与「今日是否落在阶段范围内」；(2) 作为阶段进度的分母 M
+ * （阶段进度 = 每天详情里已完成的天数 / [days]，见 [StageDayRecords]）。
  *
  * 持久化约定：homework_item.stage_range 列以本枚举 name 字符串存储。
  */
@@ -43,9 +46,17 @@ enum class StageRange(val days: Int) {
     /** 覆盖时长（便于计算时间区间） */
     val duration: Duration get() = Duration.ofDays(days.toLong())
 
-    /** 从 [startEpochDay]（含当天）起覆盖的最后一个日子（epochDay） */
+    /** 从 [startEpochDay]（含当天）起覆盖的最后一个日子（epochDay），即阶段的结束日 */
     fun lastEpochDay(startEpochDay: Long): Long =
         LocalDate.ofEpochDay(startEpochDay).plusDays(days - 1L).toEpochDay()
+
+    /** 从 [startEpochDay]（含当天）起覆盖的全部自然日（epochDay 升序，长度 = [days]） */
+    fun coveredEpochDays(startEpochDay: Long): List<Long> =
+        (0 until days.toLong()).map { offset -> startEpochDay + offset }
+
+    /** [epochDay] 是否落在自 [startEpochDay] 起的覆盖区间内（含首尾） */
+    fun covers(startEpochDay: Long, epochDay: Long): Boolean =
+        epochDay >= startEpochDay && epochDay <= lastEpochDay(startEpochDay)
 
     companion object {
 

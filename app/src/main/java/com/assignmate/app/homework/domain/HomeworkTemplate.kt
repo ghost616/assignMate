@@ -2,26 +2,33 @@ package com.assignmate.app.homework.domain
 
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.ZoneId
+import java.time.ZoneOffset
 
 /**
  * 录入模板：描述「这次要录入什么作业」，由 [HomeworkValidators.validateTemplate] 校验后
- * 经 [toItems] 展开为一条或多条 [HomeworkItem] 落库。
+ * 经 [toItems] 落库为**恰好 1 条** [HomeworkItem]（阶段作业同样只产出 1 条，见下）。
  *
  * 展开规则：
- * - 当天作业（[type] = TODAY）：固定落在 [startEpochDay] 当天，产出 1 条作业项；
- * - 阶段作业（[type] = STAGE）：必须带 [stageRange]，自 [startEpochDay] 起逐日展开
- *   [StageRange.days] 天，每天产出 1 条作业项（逐日可独立完成，互不影响状态）。
+ * - 当天作业（[type] = TODAY）：落在 [startEpochDay] 当天，产出 1 条作业项；
+ * - 阶段作业（[type] = STAGE）：必须带 [stageRange]，**同样只产出 1 条**作业项——
+ *   阶段作业是「一个在阶段内每天都要完成的作业项」，不是「每天各一条作业」；
+ *   [stageRange] 只用于计算阶段起止日（[coveredEpochDays]/[lastEpochDay]）与阶段进度的分母 M。
  *
- * 「归属日」取舍（有意为之，避免死代码）：homework_item 表没有「归属日」列（本计划不引入 schema 变更），
- * 因此逐日展开的作业项**不持久化日期**，先后顺序仅由 priority 表达；
- * 相应地按日定位的辅助（HomeworkScheduleDay、HomeworkValidators.startOfDayMillis）已删除。
- * 若后续需要按日定位（按日提醒、按日统计），需先在 core 侧为 homework_item 增加 day 列并配套迁移，
- * 再在此处回填归属日。
+ * 截止时间语义（两类刻意不同）：
+ * - TODAY：[deadline] 为绝对时刻（日期 + 时刻），可空；
+ * - STAGE：[deadline] **只填时刻**（time-of-day），语义为「阶段范围内每天到这个时刻截止」；
+ *   落库时经 [HomeworkDailyDeadlineCodec] 把「阶段起始日 + 每日时刻」编码进 deadline 列，
+ *   使其可唯一还原且不依赖创建时刻反推。
  *
  * 约束（见 [HomeworkValidators]）：
- * - 阶段作业必须选阶段范围；家长录入（[creatorRole] = PARENT）的阶段作业必须设 [deadline]；
+ * - 阶段作业必须选阶段范围；家长录入（[creatorRole] = PARENT）的阶段作业必须设每日截止时刻；
  * - 家长录入的作业必须填内容（学生录入允许留空，由学生在完成时自行填写）。
+ *
+ * 时区口径：[zoneId] 是**业务时区**，由调用方传入 core 提供的唯一业务时区绑定
+ * （生产侧注入，测试侧显式传入），本类**不提供 `ZoneId.systemDefault()` 默认值**——
+ * 否则覆写 core 绑定后，模板侧仍会以系统时区兜底，形成第二个口径入口。
  */
 data class HomeworkTemplate(
     val content: String,
@@ -30,66 +37,92 @@ data class HomeworkTemplate(
     val deadline: Instant? = null,
     val creatorRole: CreatorRole,
     val startEpochDay: Long,
-    val zoneId: ZoneId = ZoneId.systemDefault(),
+    val zoneId: ZoneId,
 ) {
 
-    /** 起始日 */
+    /** 起始日（阶段作业为阶段首日） */
     val startDate: LocalDate get() = LocalDate.ofEpochDay(startEpochDay)
 
-    /** 展开覆盖的日子（epochDay 升序）：当天作业 1 天，阶段作业按范围逐日 */
-    fun scheduleDays(): List<Long> {
-        val days = if (type == HomeworkType.STAGE) {
-            stageRange?.days ?: 1
-        } else {
-            1
-        }
-        return (0 until days).map { offset -> startEpochDay + offset }
+    /**
+     * 阶段覆盖的全部自然日（epochDay 升序）：当天作业 1 天，阶段作业 [StageRange.days] 天。
+     *
+     * 注意：这是**覆盖日集合**（用于起止日、进度分母与每日详情对齐），
+     * 不是「要落库的条目数」——[toItems] 永远只产出 1 条。
+     */
+    fun coveredEpochDays(): List<Long> = if (type == HomeworkType.STAGE) {
+        stageRange?.coveredEpochDays(startEpochDay) ?: listOf(startEpochDay)
+    } else {
+        listOf(startEpochDay)
     }
 
-    /** 阶段作业覆盖的最后一天（当天作业即 [startEpochDay] 本身） */
-    fun lastEpochDay(): Long = scheduleDays().last()
+    /** 阶段覆盖的最后一天（当天作业即 [startEpochDay] 本身） */
+    fun lastEpochDay(): Long =
+        if (type == HomeworkType.STAGE) {
+            stageRange?.lastEpochDay(startEpochDay) ?: startEpochDay
+        } else {
+            startEpochDay
+        }
 
     /** 结束日（便于 UI 展示「覆盖至 X 月 X 日」） */
     val endDate: LocalDate get() = LocalDate.ofEpochDay(lastEpochDay())
 
-    /** 阶段覆盖的最后一天是否不晚于 deadline 所在日（无 deadline 视为满足） */
-    fun fitsWithinDeadline(): Boolean {
-        val end = deadline ?: return true
-        val deadlineEpochDay = end.atZone(zoneId).toLocalDate().toEpochDay()
-        return lastEpochDay() <= deadlineEpochDay
+    /** 阶段覆盖天数（进度分母 M）：阶段作业为 [StageRange.days]，当天作业为 1 */
+    val coveredDays: Int get() = coveredEpochDays().size
+
+    /** 阶段作业的每日截止时刻（[deadline] 解码；当天作业或脏值返回 null） */
+    val dailyDeadlineTime: LocalTime?
+        get() = if (type == HomeworkType.STAGE) {
+            deadline?.toEpochMilli()?.let(HomeworkDailyDeadlineCodec::decodeStageDaily)
+        } else {
+            null
+        }
+
+    /**
+     * 落库 deadline 取值：
+     * - TODAY：原样（绝对时刻语义不变）；
+     * - STAGE：由「阶段起始日 + 每日时刻」编码而来（入参 [deadline] 承载的即每日时刻）。
+     */
+    private fun persistedDeadline(): Instant? = when (type) {
+        HomeworkType.TODAY -> deadline
+        HomeworkType.STAGE -> deadline?.let { daily ->
+            // 阶段每日时刻是**钟面值**（time-of-day），与业务时区无关：
+            // 入参由 [HomeworkDailyDeadlineCodec.timeOfDayCarrier] 以 UTC 锚定日承载，
+            // 故此处同样按 UTC 取出钟面值，避免经业务时区往返时发生 ±8 小时偏移
+            val time = LocalTime.ofInstant(daily, ZoneOffset.UTC)
+            HomeworkDailyDeadlineCodec.encodeStageDaily(startEpochDay, time)
+        }
     }
 
     /**
-     * 展开为落库作业项集合（逐日升序，状态均为 [HomeworkStatus.INITIAL]）。
+     * 展开为落库作业项（**固定 1 条**，状态为 [HomeworkStatus.INITIAL]，未排定时间）。
      *
      * @param parentAccountId 归属家长账号 id（冗余维度，来自会话）
      * @param studentId 归属学生 id（来自会话或家长选中的学生）
      * @param createdAt 创建时刻（来自可注入时钟）
-     * @param firstPriority 首条作业项优先级，其后逐条累加 [HomeworkConstants.PRIORITY_STEP]
+     * @param firstPriority 作业项优先级（后续新增项按 [HomeworkConstants.PRIORITY_STEP] 追加到末尾）
      */
     fun toItems(
         parentAccountId: Long,
         studentId: Long,
         createdAt: Instant,
         firstPriority: Int,
-    ): List<HomeworkItem> =
-        scheduleDays().mapIndexed { index, day ->
-            HomeworkItem(
-                id = NEW_ITEM_ID,
-                parentAccountId = parentAccountId,
-                studentId = studentId,
-                content = content.trim(),
-                type = type,
-                stageRange = if (type == HomeworkType.STAGE) stageRange else null,
-                deadline = deadline,
-                priority = firstPriority + index * HomeworkConstants.PRIORITY_STEP,
-                startTime = null,
-                estimatedMinutes = null,
-                status = HomeworkStatus.INITIAL,
-                createdByRole = creatorRole,
-                createdAt = createdAt,
-            )
-        }
+    ): List<HomeworkItem> = listOf(
+        HomeworkItem(
+            id = NEW_ITEM_ID,
+            parentAccountId = parentAccountId,
+            studentId = studentId,
+            content = content.trim(),
+            type = type,
+            stageRange = if (type == HomeworkType.STAGE) stageRange else null,
+            deadline = persistedDeadline(),
+            priority = firstPriority,
+            startTime = null,
+            estimatedMinutes = null,
+            status = HomeworkStatus.INITIAL,
+            createdByRole = creatorRole,
+            createdAt = createdAt,
+        ),
+    )
 
     companion object {
 

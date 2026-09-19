@@ -23,7 +23,6 @@ import com.assignmate.app.core.ui.components.AssignMateBigButton
 import com.assignmate.app.core.ui.components.CoreEmptyPlaceholder
 import com.assignmate.app.core.ui.components.CoreErrorPlaceholder
 import com.assignmate.app.core.ui.components.CoreLoadingPlaceholder
-import com.assignmate.app.stats.domain.DaySummary
 
 /**
  * 当日盘点页：完成率（进度 + 百分比）、暂停次数、暂停总时长、暂停最久作业。
@@ -33,6 +32,8 @@ import com.assignmate.app.stats.domain.DaySummary
  *   （[StatsDestination.ARG_EPOCH_DAY_TODAY] 表示「今天」），历史查询页「查看这一天的盘点」
  *   据此传入所选日期，本页展示该日的盘点；
  * - [onOpenItemDetail] → stats 单项详情页 `stats/item/{studentId}/{homeworkId}`；
+ *   当前回调协议为 (studentId, homeworkId)，详情页日期暂取「今天」；若要让「历史日盘点里点开的详情」
+ *   也落在该历史日，需 framework 在详情路由上补日期参数并把本页的 `epochDay` 一并透传；
  * - [onOpenHistory] → stats 历史查询页 `stats/history/{studentId}`；
  * - [onBack] → 上一页（清单/首页）。
  *
@@ -42,6 +43,18 @@ import com.assignmate.app.stats.domain.DaySummary
  * 日期口径：本页可按 [epochDay] 展示任意历史日，故标题、加载态、清单卡标题与空态文案一律走
  * [DaySummaryUiState] 的日期口径投影（`titleText` / `loadingText` / `itemListTitle` / `emptyText`），
  * 页面内不再自行判断「今天」，避免同一屏出现「今天」与具体日期两套措辞。
+ *
+ * 一次性事件接线（与 [HistoryRoute] 同口径，防同类退化）：事件消费协程的 key 为 `viewModel`
+ * 而**不是** `Unit`——宿主替换 ViewModel 实例（进程恢复 / 依赖变更 / 不同导航条目复用同一屏）时，
+ * 旧协程必须随之取消，否则它会一直挂在**废弃实例**的 Channel 上，新实例的事件无人消费、界面表现为
+ * 「点击按钮无反应」。
+ *
+ * 本页两个事件都不存在「拿不到学生就无法导航」的静默死路，故不需要像历史页那样补丢弃兜底：
+ * - `OpenHistory` 直接携带学生 id（[DaySummaryViewModel.openHistory] 在未解析学生时压根不发事件）；
+ * - `OpenItemDetail` 需要 `uiState.studentId` 才能构造 `stats/item/{studentId}/{homeworkId}` 路由，
+ *   而该事件只可能来自「清单行上的按钮被点击」，按钮仅在 `summary != null`（即清单已就绪）时渲染，
+ *   而 `studentId` 与 `summary` 由同一次状态更新写入、此后不会被重置为 null
+ *   （见 `DaySummaryViewModelTest` 的「清单可点击时学生必已解析」用例）。
  */
 @Composable
 fun DaySummaryRoute(
@@ -55,7 +68,11 @@ fun DaySummaryRoute(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     LaunchedEffect(studentId, epochDay) { viewModel.start(studentId, epochDay) }
-    LaunchedEffect(Unit) {
+    // 事件消费的 key 是 viewModel 而非 Unit（与 HistoryScreen 同口径）：宿主替换 ViewModel 实例
+    // （进程恢复 / 依赖变更 / 不同导航条目复用同一屏）时，旧协程必须随之取消——否则它会一直挂在
+    // **废弃实例**的 Channel 上，而新实例的事件（「查看这一项详情」「查看历史完成情况」）无人消费，
+    // 表现为点击按钮无反应。
+    LaunchedEffect(viewModel) {
         viewModel.events.collect { event ->
             when (event) {
                 is DaySummaryEvent.OpenItemDetail -> uiState.studentId?.let { resolved ->
@@ -147,7 +164,7 @@ private fun DaySummaryBody(
         PauseCard(uiState = uiState)
         Spacer(modifier = Modifier.height(12.dp))
         ItemListCard(
-            summary = summary,
+            rows = uiState.itemRows,
             title = uiState.itemListTitle,
             onOpenItemDetail = onOpenItemDetail,
         )
@@ -192,31 +209,36 @@ private fun PauseCard(uiState: DaySummaryUiState) {
 }
 
 /**
- * 当日作业清单卡片：每项可进入单项详情。
+ * 当天应做作业清单卡片：每项可进入单项详情（按这天查看）。
  *
- * [title] 由状态按盘点日期投影（今天 / 这一天，含项数），避免历史日视图与上方标题口径矛盾。
+ * [title] 由状态按盘点日期投影（今天 / 这一天，含项数），避免历史日视图与上方标题口径矛盾；
+ * 每行的状态与阶段打卡进度同样来自 [DaySummaryUiState.itemRows]（取自作业每天详情）。
  * 空清单不会走到这里（[DaySummaryBody] 已先行展示空态），故循环内不做空判，
  * 避免出现「两个空态提示」的重复展示。
  */
 @Composable
 private fun ItemListCard(
-    summary: DaySummary,
+    rows: List<DayItemRow>,
     title: String,
     onOpenItemDetail: (homeworkId: Long) -> Unit,
 ) {
     StatsCard(title = title) {
-        summary.items.forEachIndexed { index, item ->
+        rows.forEachIndexed { index, row ->
             if (index > 0) {
                 Spacer(modifier = Modifier.height(12.dp))
             }
             Text(
-                text = "${item.content}（${item.status.label}）",
+                text = "${row.content}（${row.statusText}）",
                 style = MaterialTheme.typography.bodyLarge,
             )
+            row.stageProgressText?.let { progress ->
+                Spacer(modifier = Modifier.height(4.dp))
+                StatsHintText(text = progress)
+            }
             Spacer(modifier = Modifier.height(6.dp))
             AssignMateBigButton(
                 text = "查看这一项详情",
-                onClick = { onOpenItemDetail(item.id) },
+                onClick = { onOpenItemDetail(row.homeworkId) },
             )
         }
         Spacer(modifier = Modifier.height(8.dp))

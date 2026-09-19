@@ -147,6 +147,7 @@ class TimerRepositoryImplTest {
             authRepository = env.authRepository,
             clock = env.clock,
             transactionRunner = env.transactionRunner,
+            dailyRecordRepository = env.dailyRecordRepository,
         )
 
         val result = repository.startSession(homework.id, Role.STUDENT)
@@ -416,6 +417,7 @@ class TimerRepositoryImplTest {
             authRepository = env.authRepository,
             clock = env.clock,
             transactionRunner = env.transactionRunner,
+            dailyRecordRepository = env.dailyRecordRepository,
         )
         env.advance(30_000L)
 
@@ -622,6 +624,8 @@ class TimerRepositoryImplTest {
         PauseRecordEntity(
             sessionId = sessionId,
             homeworkId = homeworkId,
+            // 实体已移除 epochDay 的 Kotlin 默认值：脏行按「未指定」哨兵 0 显式构造
+            epochDay = 0L,
             pauseStartAt = Instant.ofEpochMilli(startMillis),
         )
 

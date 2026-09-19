@@ -61,6 +61,14 @@ class FakePauseRecordDao : PauseRecordDao {
     override suspend fun loadByHomework(homeworkId: Long): List<PauseRecordEntity> =
         rows.filter { it.homeworkId == homeworkId }.sortedBy { it.pauseStartAt }
 
+    /** 按作业 + 业务自然日查询（排序口径与库内 SQL 一致：暂停开始时刻升序） */
+    override suspend fun loadByHomeworkAndDay(
+        homeworkId: Long,
+        epochDay: Long,
+    ): List<PauseRecordEntity> =
+        rows.filter { it.homeworkId == homeworkId && it.epochDay == epochDay }
+            .sortedBy { it.pauseStartAt }
+
     override suspend fun findUnfinishedBySession(sessionId: Long): PauseRecordEntity? =
         rows.filter { it.sessionId == sessionId && it.pauseEndAt == null }
             .maxByOrNull { it.pauseStartAt }

@@ -3,6 +3,7 @@ package com.assignmate.app.homework.domain
 import com.assignmate.app.auth.domain.Role
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.ZoneId
 
 /**
@@ -30,10 +31,10 @@ enum class HomeworkValidationError {
     /** 阶段作业未选阶段范围 */
     MISSING_STAGE_RANGE,
 
-    /** 家长录入的阶段作业未设截止时间 */
+    /** 家长录入的阶段作业未设「每日截止时刻」 */
     MISSING_STAGE_DEADLINE,
 
-    /** 开始时间 + 预估时长晚于截止时间 */
+    /** 开始时间 + 预估时长晚于截止时间（当天作业的单日截止时间；或阶段作业的当日截止时刻） */
     DEADLINE_EXCEEDED,
 
     /** 预估时长不合法（非正整数或超出允许区间） */
@@ -73,7 +74,10 @@ private const val MILLIS_PER_MINUTE = 60_000L
  * homework 纯函数校验集合（无副作用、无 IO、依赖可注入时钟传入的"当前时间"，集中可单测）。
  *
  * 覆盖四类业务规则：
- * 1. deadline 约束：开始时间 + 预估时长不得晚于 deadline；
+ * 1. 截止时间约束（**按作业类型分两种语义**）：
+ *    - 当天作业（TODAY）：绝对时刻语义——开始时间 + 预估时长不得晚于 deadline（[validateDeadline]）；
+ *    - 阶段作业（STAGE）：**每日时刻**语义——某天的「开始时刻 + 预估时长」不得跨过「该天的截止时刻」
+ *      （[validateScheduleWithinDailyDeadline]），**不再有「阶段覆盖末日 ≤ deadline 所在日」这条旧规则**；
  * 2. 时间段防冲突：候选时间段与同学生其它已排定作业不重叠（排除自身）；
  * 3. 权限规则：两个维度刻意分开——
  *    改删权（[canModify]/[canDelete]）只看录入者角色：学生仅可改删自己新增项，家长可改删全部；
@@ -85,11 +89,11 @@ private const val MILLIS_PER_MINUTE = 60_000L
  */
 object HomeworkValidators {
 
-    // ---- 1. deadline 约束 ----
+    // ---- 1. 截止时间约束 ----
 
     /**
-     * 校验候选时间段是否满足 deadline 约束：开始时间 + 预估时长不得晚于 [deadline]。
-     * deadline 为空视为无约束。
+     * 校验候选时间段是否满足**当天作业**的 deadline 约束：开始时间 + 预估时长不得晚于 [deadline]。
+     * deadline 为空视为无约束；正好等于视为通过。
      */
     fun validateDeadline(
         startMillis: Long,
@@ -105,6 +109,72 @@ object HomeworkValidators {
         } else {
             HomeworkValidation.Valid
         }
+    }
+
+    /**
+     * 校验候选开始时刻与预估时长是否满足**阶段作业的每日截止时刻**：
+     * 从开始时刻起的时长不得跨过「当日截止时刻」。
+     *
+     * 语义说明：阶段作业既没有「阶段末日」约束（已推翻），也不允许把一段常规时长的作业跨过当日截止时刻——
+     * 若只比对钟面时刻，「21:00 开始 600 分钟」这类跨日取值会被钟面比较误判为通过，
+     * 故按「开始时刻 + 时长」的绝对瞬时与「当天截止时刻」的绝对瞬时比较（严格晚于即失败，等于通过）。
+     *
+     * @param startMillis 候选开始时刻（epoch 毫秒）
+     * @param estimatedMinutes 预估时长（分钟）
+     * @param dailyDeadlineTime 阶段作业的每日截止时刻；为 null 视为无约束（学生录入可留空）
+     * @param zoneId 业务时区（把钟面时刻折算为绝对瞬时的唯一口径）
+     */
+    fun validateScheduleWithinDailyDeadline(
+        startMillis: Long,
+        estimatedMinutes: Int,
+        dailyDeadlineTime: LocalTime?,
+        zoneId: ZoneId,
+    ): HomeworkValidation {
+        if (dailyDeadlineTime == null) {
+            return HomeworkValidation.Valid
+        }
+        val start = Instant.ofEpochMilli(startMillis).atZone(zoneId)
+        val deadlineMillis = start.toLocalDate().atTime(dailyDeadlineTime).atZone(zoneId).toInstant().toEpochMilli()
+        return validateDeadline(
+            startMillis = startMillis,
+            estimatedMinutes = estimatedMinutes,
+            deadlineMillis = deadlineMillis,
+        )
+    }
+
+    /**
+     * 校验候选开始时刻与预估时长是否满足**某条作业**的截止约束（按类型分流的单一入口）：
+     * - 当天作业（TODAY）：绝对 deadline 语义（[validateDeadline]）；
+     * - 阶段作业（STAGE）：该天「每日截止时刻」语义（[validateScheduleWithinDailyDeadline]），
+     *   以**开始时刻所在的自然日**为「该天」，与仓库 updateSchedule 判定完全一致。
+     *
+     * 存在意义：两类语义共存于 deadline 一列，各消费方若各自解释同一列就会互相矛盾——
+     * 时间设定页曾用绝对时刻口径预校验阶段作业（deadline = timeOfDayCarrier ≈ 75_600_000 ms），
+     * 导致阶段作业在「设时间/改时间」页永远提交不了（UI 先拦、仓库本会放行）。
+     *
+     * @param item 目标作业（提供类型、每日时刻与绝对 deadline）
+     * @param startMillis 候选开始时刻（epoch 毫秒）
+     * @param estimatedMinutes 预估时长（分钟）
+     * @param zoneId 业务时区
+     */
+    fun validateScheduleWithinItemDeadline(
+        item: HomeworkItem,
+        startMillis: Long,
+        estimatedMinutes: Int,
+        zoneId: ZoneId,
+    ): HomeworkValidation = if (item.isStage) {
+        validateScheduleWithinDailyDeadline(
+            startMillis = startMillis,
+            estimatedMinutes = estimatedMinutes,
+            dailyDeadlineTime = item.dailyDeadlineTime,
+            zoneId = zoneId,
+        )
+    } else {
+        validateDeadline(
+            startMillis = startMillis,
+            estimatedMinutes = estimatedMinutes,
+            deadlineMillis = item.deadline?.toEpochMilli(),
+        )
     }
 
     // ---- 2. 时间段防冲突 ----
@@ -222,8 +292,9 @@ object HomeworkValidators {
     /**
      * 校验录入模板：
      * - 作业内容非空且不超长（家长录入必填，学生录入可为空）；
-     * - 阶段作业必须选阶段范围；家长录入的阶段作业必须设 deadline；
-     * - 阶段范围覆盖的最后一天不得晚于 deadline 所在日。
+     * - 阶段作业必须选阶段范围；
+     * - 家长录入的阶段作业必须设**每日截止时刻**（time-of-day 语义，不再要求日期；
+     *   旧规则「阶段覆盖最后一天不得晚于 deadline 所在日」已推翻，见类注释）。
      */
     fun validateTemplate(template: HomeworkTemplate): Result<ValidatedTemplate> {
         val content = template.content.trim()
@@ -241,11 +312,8 @@ object HomeworkValidators {
             if (template.stageRange == null) {
                 return failure(HomeworkValidationError.MISSING_STAGE_RANGE)
             }
-            if (template.creatorRole == CreatorRole.PARENT && template.deadline == null) {
+            if (template.creatorRole == CreatorRole.PARENT && template.dailyDeadlineTime == null) {
                 return failure(HomeworkValidationError.MISSING_STAGE_DEADLINE)
-            }
-            if (!template.fitsWithinDeadline()) {
-                return failure(HomeworkValidationError.DEADLINE_EXCEEDED)
             }
         }
         return Result.success(ValidatedTemplate(template))
@@ -254,44 +322,24 @@ object HomeworkValidators {
     /**
      * 由既有作业项与新的类型/阶段范围/deadline 推导出的候选值是否合法（家长修改场景）。
      *
-     * 与 [validateTemplate] 同一套规则：阶段作业必须带阶段范围、家长录入的阶段作业必须设 deadline，
-     * 且阶段范围覆盖的最后一天不得晚于 deadline 所在日（避免"改了阶段范围/缩短 deadline 后覆盖越界"）。
+     * 与 [validateTemplate] 同一套规则：阶段作业必须带阶段范围、家长录入的阶段作业必须设每日截止时刻；
+     * 旧的「阶段覆盖末日不得晚于 deadline 所在日」约束已推翻（阶段 deadline 只表达每日时刻）。
      *
-     * @param startEpochDay 阶段范围的起始日（epochDay，取自作业创建日），仅阶段作业参与计算
+     * @param dailyDeadlineTime 候选的每日截止时刻（阶段作业；由新的 deadline 解码得到）
      */
     fun validateTypeChange(
         type: HomeworkType,
         stageRange: StageRange?,
-        deadlineMillis: Long?,
         creatorRole: CreatorRole,
-        startEpochDay: Long = 0L,
+        dailyDeadlineTime: LocalTime?,
     ): HomeworkValidation = when {
         type == HomeworkType.STAGE && stageRange == null ->
             HomeworkValidation.Invalid(HomeworkValidationError.MISSING_STAGE_RANGE)
 
-        type == HomeworkType.STAGE && creatorRole == CreatorRole.PARENT && deadlineMillis == null ->
+        type == HomeworkType.STAGE && creatorRole == CreatorRole.PARENT && dailyDeadlineTime == null ->
             HomeworkValidation.Invalid(HomeworkValidationError.MISSING_STAGE_DEADLINE)
 
-        type == HomeworkType.STAGE && deadlineMillis != null &&
-            !stageRangeWithinDeadline(startEpochDay, stageRange?.days ?: 1, deadlineMillis) ->
-            HomeworkValidation.Invalid(HomeworkValidationError.DEADLINE_EXCEEDED)
-
         else -> HomeworkValidation.Valid
-    }
-
-    /**
-     * 阶段范围（自 [startEpochDay] 起 [days] 天）覆盖的最后一天是否不晚于 [deadlineMillis] 所在日。
-     * deadline 为空视为无约束；口径与 [HomeworkTemplate.fitsWithinDeadline] 一致。
-     */
-    fun stageRangeWithinDeadline(
-        startEpochDay: Long,
-        days: Int,
-        deadlineMillis: Long?,
-        zoneId: ZoneId = ZoneId.systemDefault(),
-    ): Boolean {
-        val deadline = deadlineMillis ?: return true
-        val deadlineEpochDay = epochDayOf(deadline, zoneId)
-        return startEpochDay + (days - 1L) <= deadlineEpochDay
     }
 
     // ---- 业务时间口径 ----
@@ -299,7 +347,7 @@ object HomeworkValidators {
     /**
      * 时刻 -> 自然日（epochDay），一律按业务时区折算。
      *
-     * data 层（阶段范围覆盖校验）与 ui 层（各页面「今天」）共用本函数，
+     * data 层（阶段覆盖日 / 当天作业归属日）与 ui 层（各页面「今天」）共用本函数，
      * 避免出现 `currentTimeMillis() / 86_400_000` 这类 UTC 折算——
      * 那会让 UTC+8 的凌晨（00:00-07:59）取到昨天，且与页面展示口径不一致。
      */

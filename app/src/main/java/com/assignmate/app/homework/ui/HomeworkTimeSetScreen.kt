@@ -45,6 +45,9 @@ import java.time.ZoneId
  *
  * [onHomeworkScheduleSaved] 为排定成功后的收尾通知（默认空实现），由 framework 接到
  * 「按新时刻同步该作业的到点提醒」；本模块不依赖 timer。
+ *
+ * 排定成功后的时序：外抛收尾通知 → **立即**执行 [onSaved]（回清单）→ 非挂起地把提示文案写入
+ * [homeworkSaveNotice] 由清单页展示；本页不再 await 提示条（详见 [dispatchSaveCompletion]）。
  */
 @Composable
 fun HomeworkTimeSetRoute(
@@ -71,10 +74,15 @@ fun HomeworkTimeSetRoute(
         viewModel.events.collect { event ->
             when (event) {
                 is TimeSetEvent.Saved -> {
-                    // 排定成功：先外抛收尾通知（framework 按新时刻同步到点提醒），再提示并返回
+                    // 排定成功：先外抛收尾通知（framework 按新时刻同步到点提醒），再**立即**回清单。
+                    // 提示文案不再在此 await（修复前 Long 约 10 秒的提示会挡住返回，且提示期间离开组合
+                    // 会使 onSaved 连同提醒同步被取消），改为经跨页一次性暂存由清单页展示
                     onHomeworkScheduleSaved(event.homeworkId)
-                    snackbarHostState.showSnackbar(event.message, duration = SnackbarDuration.Long)
-                    onSaved()
+                    dispatchSaveCompletion(
+                        dispatchMessage = event.message,
+                        saveNotice = homeworkSaveNotice,
+                        onSaved = onSaved,
+                    )
                 }
 
                 is TimeSetEvent.ShowMessage -> snackbarHostState.showSnackbar(
@@ -97,6 +105,9 @@ fun HomeworkTimeSetRoute(
                 onMinutesChange = viewModel::onEstimatedMinutesChange,
                 onSubmit = viewModel::onSubmit,
             ),
+            // 业务时区来自 ViewModel 注入的 core 唯一绑定：作业概要的截止时刻展示与
+            // 仓库/「今天」口径同源（覆写该绑定即全局生效，页面不再以 systemDefault 兜底）
+            zoneId = viewModel.zoneId,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
@@ -113,13 +124,18 @@ class HomeworkTimeSetCallbacks(
     val onSubmit: () -> Unit,
 )
 
-/** 时间设定页内容（无状态） */
+/**
+ * 时间设定页内容（无状态）。
+ *
+ * @param zoneId 业务时区：由 [HomeworkTimeSetRoute] 透传 ViewModel 注入的 core 唯一绑定，
+ *   **刻意不带默认值**（默认 `systemDefault()` 会让覆写绑定后的展示口径漂移）
+ */
 @Composable
 fun HomeworkTimeSetContent(
     uiState: HomeworkTimeSetUiState,
     callbacks: HomeworkTimeSetCallbacks,
+    zoneId: ZoneId,
     modifier: Modifier = Modifier,
-    zoneId: ZoneId = ZoneId.systemDefault(),
 ) {
     Column(
         modifier = modifier
@@ -245,7 +261,9 @@ private fun HomeworkSummaryCard(item: HomeworkItem?, zoneId: ZoneId) {
             if (item?.deadline != null) {
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "截止：${TimeFormatters.formatDateTime(item.deadline.toEpochMilli(), zoneId)}",
+                    // 阶段作业只展示「每天 HH:mm 截止」；当天作业展示「日期 + 时刻」
+                    text = item.deadlineLabel { millis -> TimeFormatters.formatDateTime(millis, zoneId) }
+                        ?: "",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error,
                 )

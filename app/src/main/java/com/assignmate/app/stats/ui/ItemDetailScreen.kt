@@ -24,22 +24,28 @@ import com.assignmate.app.core.ui.components.CoreErrorPlaceholder
 import com.assignmate.app.core.ui.components.CoreLoadingPlaceholder
 
 /**
- * 单项详情页：预估时长 / 实际时长 / 暂停时长 + 困难度侧面评估提示。
+ * 单项详情页：**指定某一天**的预估时长 / 实际时长 / 暂停时长 + 当天状态 + 困难度侧面评估提示。
  *
- * 无执行记录（[ItemDetailUiState.hasExecution] 为 false）时展示「尚未开始 / 暂无数据」，
+ * 口径：时长与暂停都取自「这一天的作业每天详情」，阶段作业的每一天分别查看（不再给整段累计），
+ * 故卡片标题与说明文案均按所选日期输出（[ItemDetailUiState.timeCardTitle] / [ItemDetailUiState.noteText]）。
+ * 当天没有执行痕迹（[ItemDetailUiState.hasExecution] 为 false）时展示「尚未开始 / 暂无数据」，
  * 而非困难度结论——空数据不应被误读为「很轻松」。
  *
- * 导航契约（framework 接线）：[onBack] 返回上一页（当日盘点/历史查询）。
+ * 导航契约（framework 接线）：页面路由 `stats/item/{studentId}/{homeworkId}`（不带日期），
+ * [epochDay] 为**页面入参**且缺省 [StatsDestination.ARG_EPOCH_DAY_TODAY]（「今天」）——
+ * 让「历史日盘点里点开的详情」落在该历史日需要 framework 在路由上补查询参数并透传（framework 计划范围）；
+ * [onBack] 返回上一页（当日盘点）。
  */
 @Composable
 fun ItemDetailRoute(
     studentId: Long,
     homeworkId: Long,
     onBack: () -> Unit,
+    epochDay: Long = StatsDestination.ARG_EPOCH_DAY_TODAY,
     modifier: Modifier = Modifier,
     viewModel: ItemDetailViewModel = hiltViewModel(),
 ) {
-    LaunchedEffect(studentId, homeworkId) { viewModel.start(studentId, homeworkId) }
+    LaunchedEffect(studentId, homeworkId, epochDay) { viewModel.start(studentId, homeworkId, epochDay) }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     ItemDetailContent(
         uiState = uiState,
@@ -64,7 +70,8 @@ fun ItemDetailContent(
     ) {
         Spacer(modifier = Modifier.height(24.dp))
         when (uiState.phase) {
-            ItemDetailPhase.LOADING -> CoreLoadingPlaceholder(text = "正在读取这一项的用时…")
+            // 加载态文案随查看日期收敛（历史日显示具体日期，与卡片标题同源）
+            ItemDetailPhase.LOADING -> CoreLoadingPlaceholder(text = uiState.loadingText)
             ItemDetailPhase.NO_SESSION -> CoreErrorPlaceholder(
                 message = StatsErrorMessages.NO_ACTIVE_SESSION,
                 onRetry = onBack,
@@ -97,16 +104,21 @@ private fun ItemDetailBody(uiState: ItemDetailUiState) {
         modifier = Modifier.fillMaxWidth(),
     )
     Spacer(modifier = Modifier.height(16.dp))
-    StatsCard(title = "用时情况（累计）") {
+    StatsCard(title = uiState.timeCardTitle) {
         StatsMetricRow(label = "预估时长", value = uiState.estimatedText)
         Spacer(modifier = Modifier.height(6.dp))
-        StatsMetricRow(label = "实际时长（累计）", value = uiState.elapsedText)
+        StatsMetricRow(label = "实际时长", value = uiState.elapsedText)
         Spacer(modifier = Modifier.height(6.dp))
-        StatsMetricRow(label = "暂停时长（累计）", value = uiState.pausedText)
+        StatsMetricRow(label = "暂停时长", value = uiState.pausedText)
         Spacer(modifier = Modifier.height(6.dp))
-        StatsMetricRow(label = "执行次数", value = uiState.sessionCountText)
+        StatsMetricRow(label = "当天状态", value = uiState.statusText)
         Spacer(modifier = Modifier.height(8.dp))
-        StatsHintText(text = ITEM_DETAIL_CUMULATIVE_NOTE)
+        // 阶段打卡进度以说明行的形式给出（与历史条目同一文案口径），避免与指标标签重复措辞
+        uiState.stageProgressText?.let { progress ->
+            StatsHintText(text = progress)
+            Spacer(modifier = Modifier.height(4.dp))
+        }
+        StatsHintText(text = uiState.noteText)
     }
     Spacer(modifier = Modifier.height(12.dp))
     StatsCard(title = "困难度提示（仅供参考）") {
@@ -118,9 +130,3 @@ private fun ItemDetailBody(uiState: ItemDetailUiState) {
     }
     Spacer(modifier = Modifier.height(12.dp))
 }
-
-/**
- * 累计口径说明文案：详情页的时长是「全部执行历史」合计，而当日盘点只统计当日窗口内的部分，
- * 跨天多次计时的作业两处数字会不同——显式标注避免家长误读为当日用时。
- */
-private const val ITEM_DETAIL_CUMULATIVE_NOTE = "实际时长与暂停时长为累计值（含全部执行历史），与当日盘点口径可能不同"

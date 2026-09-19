@@ -82,6 +82,8 @@ class TimerRepositoryEdgeCaseTest {
                 homeworkId = 1L,
                 studentId = TimerTestEnv.STUDENT_ID,
                 parentAccountId = TimerTestEnv.PARENT_ID,
+                // 实体已移除 epochDay 的 Kotlin 默认值：此处显式写「未指定」哨兵 0（历史脏行口径）
+                epochDay = UNSPECIFIED_EPOCH_DAY,
                 startedAt = Instant.ofEpochMilli(TimerTestEnv.FIXED_MILLIS),
                 finishedAt = null,
                 pausedTotalMillis = 0L,
@@ -206,4 +208,10 @@ class TimerRepositoryEdgeCaseTest {
 
     private suspend fun TimerTestEnv.start(homeworkId: Long): com.assignmate.app.timer.domain.TimerSession =
         (repository.startSession(homeworkId, Role.STUDENT) as TimerStartResult.Success).session
+
+    private companion object {
+
+        /** `epoch_day` 的「未指定」哨兵（列默认值 0）：仅用于构造历史脏行，正常写入必须显式折算 */
+        const val UNSPECIFIED_EPOCH_DAY = 0L
+    }
 }

@@ -2,7 +2,6 @@ package com.assignmate.app.stats.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.assignmate.app.stats.data.StatsFailure
 import com.assignmate.app.stats.data.StatsRepository
 import com.assignmate.app.stats.data.StatsResult
 import com.assignmate.app.stats.domain.DaySummary
@@ -107,7 +106,7 @@ class StatsDateScopeUiEdgeTest {
         assertEquals("2023-11-15", tomorrow.dateText)
         assertEquals("2023-11-15 的作业盘点", tomorrow.titleText)
         assertEquals("正在盘点 2023-11-15 的作业…", tomorrow.loadingText)
-        assertEquals("这一天动过的作业（2 项）", tomorrow.itemListTitle)
+        assertEquals("这一天要做的作业（2 项）", tomorrow.itemListTitle)
         assertEquals(StatsErrorMessages.NO_DATA, tomorrow.emptyText)
     }
 
@@ -116,16 +115,16 @@ class StatsDateScopeUiEdgeTest {
     @Test
     fun `清单卡标题在无盘点结果时按零项与日期口径渲染`() {
         val todayNoData = DaySummaryUiState(epochDay = DAY_EPOCH, todayEpochDay = DAY_EPOCH)
-        assertEquals("今天动过的作业（0 项）", todayNoData.itemListTitle)
+        assertEquals("今天要做的作业（0 项）", todayNoData.itemListTitle)
 
         val historyNoData = DaySummaryUiState(epochDay = DAY_EPOCH - 1, todayEpochDay = DAY_EPOCH)
-        assertEquals("这一天动过的作业（0 项）", historyNoData.itemListTitle)
+        assertEquals("这一天要做的作业（0 项）", historyNoData.itemListTitle)
 
         // 首帧默认态（日期尚未解析，哨兵 -1）：与既有行为一致按今天口径渲染，不抛异常
         val initial = DaySummaryUiState()
         assertTrue(initial.isToday)
         assertEquals("正在盘点今天的作业…", initial.loadingText)
-        assertEquals("今天动过的作业（0 项）", initial.itemListTitle)
+        assertEquals("今天要做的作业（0 项）", initial.itemListTitle)
         assertEquals("", initial.dateText)
     }
 
@@ -176,6 +175,29 @@ class StatsDateScopeUiEdgeTest {
         assertEquals(DaySummaryPhase.READY, viewModel.uiState.value.phase)
     }
 
+    // ---- 单项详情：加载态在取数期间即按目标日期收敛（真实时序，非仅投影） ----
+
+    @Test
+    fun `详情取数未返回时加载态已按历史日期渲染`() = runTest {
+        val stats = GatedStatsRepository()
+        val viewModel = track(detailViewModel(stats))
+
+        viewModel.start(StatsDestination.ARG_STUDENT_ID_NONE, HOMEWORK_ID, DAY_EPOCH - 1)
+
+        val loading = viewModel.uiState.value
+        assertEquals(ItemDetailPhase.LOADING, loading.phase)
+        assertEquals(DAY_EPOCH - 1, loading.epochDay)
+        assertFalse(loading.isToday)
+        assertEquals("正在读取2023-11-13的用时…", loading.loadingText)
+        assertEquals("2023-11-13的用时情况", loading.timeCardTitle)
+
+        stats.release()
+        advanceUntilIdle()
+
+        assertEquals(ItemDetailPhase.READY, viewModel.uiState.value.phase)
+        assertEquals(DAY_EPOCH - 1, viewModel.uiState.value.detail?.epochDay)
+    }
+
     // ---- 死代码清理的结构性校验 ----
 
     @Test
@@ -209,6 +231,13 @@ class StatsDateScopeUiEdgeTest {
         zoneId = DaySummaryViewModelTest.ZONE,
     )
 
+    private fun detailViewModel(stats: StatsRepository): ItemDetailViewModel = ItemDetailViewModel(
+        statsRepository = stats,
+        authRepository = FakeStatsUiAuthRepository(),
+        clock = StatsUiClock(DaySummaryViewModelTest.FIXED_MILLIS),
+        zoneId = DaySummaryViewModelTest.ZONE,
+    )
+
     private fun <T : ViewModel> track(viewModel: T): T {
         createdViewModels += viewModel
         return viewModel
@@ -218,11 +247,15 @@ class StatsDateScopeUiEdgeTest {
 
         /** 2023-11-14 的 UTC 纪元日（与既有 UI 层用例一致） */
         const val DAY_EPOCH = 19_675L
+
+        /** 单项详情用例的目标作业 id */
+        const val HOMEWORK_ID = 7L
     }
 }
 
 /**
- * 可闸门统计仓库：`summarizeDay` 挂起直到 [release]，用于观察**取数中途**的加载态文案。
+ * 可闸门统计仓库：`summarizeDay` 与 `itemDetail` 均挂起直到 [release]，
+ * 用于观察**取数中途**的加载态文案。
  */
 private class GatedStatsRepository : StatsRepository {
 
@@ -238,8 +271,10 @@ private class GatedStatsRepository : StatsRepository {
         return StatsResult.Success(daySummary(epochDay = epochDay))
     }
 
-    override suspend fun itemDetail(homeworkId: Long): StatsResult<ItemDetail> =
-        StatsResult.Failure(StatsFailure.HOMEWORK_NOT_FOUND)
+    override suspend fun itemDetail(homeworkId: Long, epochDay: Long): StatsResult<ItemDetail> {
+        gate.await()
+        return StatsResult.Success(itemDetailResult(homeworkId = homeworkId, epochDay = epochDay))
+    }
 
     override suspend fun history(
         studentId: Long,

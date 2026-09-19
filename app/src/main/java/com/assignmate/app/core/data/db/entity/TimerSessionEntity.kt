@@ -1,4 +1,4 @@
-﻿package com.assignmate.app.core.data.db.entity
+package com.assignmate.app.core.data.db.entity
 
 import androidx.room.ColumnInfo
 import androidx.room.Entity
@@ -18,14 +18,18 @@ import java.time.Instant
  * - status：计时中 RUNNING / 暂停中 PAUSED / 已结束 FINISHED；
  * - pausedTotalMillis：会话内累计暂停毫秒数（默认 0，汇总快照，明细以 pause_record 为准）；
  * - pauseCount：会话内累计暂停次数（默认 0）；
- * - finishedAt：结束时刻，会话进行中（RUNNING/PAUSED）为 null。
+ * - finishedAt：结束时刻，会话进行中（RUNNING/PAUSED）为 null；
+ * - epochDay：**业务自然日**（业务时区下的 LocalDate.toEpochDay()），使计时可按
+ *   （作业 + 自然日）归属，与 homework_daily_record 的每日详情逐日对齐；
+ *   开启计时（或恢复计时现场）时由调用方按业务时区折算后写入，**禁止 UTC 毫秒折算**。
  *
  * 归属关系：homework_id 外键关联 homework_item.id，作业删除时级联删除其计时会话
  * （ON DELETE CASCADE）；student_id、parent_account_id 为冗余归属维度（parent_account_id
  * 便于家长侧聚合展示，不加外键以免与 homework_item 的级联路径重复）。
  *
  * 索引：homework_id、student_id 支撑按作业/学生查询会话；(student_id, status) 支撑
- * “查询某学生当前进行中的会话”（进入计时页恢复未结束会话）。
+ * “查询某学生当前进行中的会话”（进入计时页恢复未结束会话）；
+ * (homework_id, epoch_day) 支撑「某作业某自然日的计时会话」逐日聚合。
  */
 @Entity(
     tableName = "timer_session",
@@ -41,6 +45,7 @@ import java.time.Instant
         Index(value = ["homework_id"]),
         Index(value = ["student_id"]),
         Index(value = ["student_id", "status"]),
+        Index(value = ["homework_id", "epoch_day"]),
     ],
 )
 data class TimerSessionEntity(
@@ -59,6 +64,18 @@ data class TimerSessionEntity(
     /** 归属家长账号 id（冗余维度，便于家长侧聚合展示） */
     @ColumnInfo(name = "parent_account_id")
     val parentAccountId: Long,
+
+    /**
+     * 业务自然日（epochDay，按业务时区折算；禁止 UTC 毫秒折算）。
+     *
+     * **无 Kotlin 默认值**（刻意为漏传暴露编译期错误）：`@ColumnInfo(defaultValue = "0")`
+     * 仅是 v4 旧库 `ALTER TABLE ADD COLUMN` 加列时的**列默认值**（旧数据可丢弃，见
+     * DatabaseModule.MIGRATION_4_5），正常写入路径必须显式传入按业务时区折算的结果——
+     * 漏传会静默写出 `epoch_day = 0` 的不可查询脏行（timer 侧对哨兵值有按开始时刻自愈折算的兜底，
+     * 但那只用于历史行，不应被新写入依赖）。
+     */
+    @ColumnInfo(name = "epoch_day", defaultValue = "0")
+    val epochDay: Long,
 
     /** 计时开始时刻（epoch 毫秒，Instant <-> Long 由 AppTypeConverters 转换） */
     @ColumnInfo(name = "started_at")

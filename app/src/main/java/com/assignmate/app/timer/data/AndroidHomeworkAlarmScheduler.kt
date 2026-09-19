@@ -21,8 +21,9 @@ import javax.inject.Singleton
  *   [AlarmScheduleResult.ScheduledInexact]，**绝不抛异常、绝不崩溃**；
  *   极端情况下精确闹钟授权在调用途中被撤销（SecurityException）时再降级一次，仍失败则视为未设置；
  *   PendingIntent 构造失败（如系统限制）同样收敛为「未设置」——[schedule] / [cancel] 对调用方**绝不抛异常**。
- * - **覆盖与取消**：请求码由 [TimerReminderRules.requestCodeOf] 由作业 id 稳定映射，
- *   配合 `FLAG_UPDATE_CURRENT`，同一作业重设即覆盖；[cancel] 用同一请求码精确取消。
+ * - **覆盖与取消**：请求码由 [TimerReminderRules.requestCodeOf] 由作业 id（单次提醒）或
+ *   「作业 id + 自然日」（阶段作业逐日提醒）稳定映射，配合 `FLAG_UPDATE_CURRENT`，
+ *   同一目标重设即覆盖；[cancel] / [cancelDaily] 用同一请求码精确取消。
  * - 闹钟到点后由 [HomeworkAlarmReceiver] 发通知并响铃震动（Receiver 的 Manifest 声明由 framework 计划同步）。
  */
 @Singleton
@@ -40,11 +41,52 @@ class AndroidHomeworkAlarmScheduler @Inject constructor(
         homeworkId: Long,
         content: String,
         triggerAtMillis: Long,
+    ): AlarmScheduleResult = setAlarm(
+        homeworkId = homeworkId,
+        requestCode = TimerReminderRules.requestCodeOf(homeworkId),
+        epochDay = null,
+        content = content,
+        triggerAtMillis = triggerAtMillis,
+    )
+
+    /**
+     * 阶段作业某一天的提醒：请求码由「作业 + 自然日」派生（与单次提醒区间错开），
+     * 因此同一天的多次同步会覆盖旧闹钟、不同天各自独立，取消也能精确命中某一天。
+     */
+    override fun scheduleDaily(
+        homeworkId: Long,
+        epochDay: Long,
+        content: String,
+        triggerAtMillis: Long,
+    ): AlarmScheduleResult = setAlarm(
+        homeworkId = homeworkId,
+        requestCode = TimerReminderRules.requestCodeOf(homeworkId, epochDay),
+        epochDay = epochDay,
+        content = content,
+        triggerAtMillis = triggerAtMillis,
+    )
+
+    override fun cancel(homeworkId: Long) {
+        cancelAlarm(homeworkId, TimerReminderRules.requestCodeOf(homeworkId), epochDay = null)
+    }
+
+    /** 取消阶段作业某一天的提醒（只影响这一天，不影响该作业的其它天与单次提醒） */
+    override fun cancelDaily(homeworkId: Long, epochDay: Long) {
+        cancelAlarm(homeworkId, TimerReminderRules.requestCodeOf(homeworkId, epochDay), epochDay)
+    }
+
+    /** 设置闹钟的公共路径：精确闹钟优先，未授权/调用途中撤销时降级，任何失败都不抛异常 */
+    private fun setAlarm(
+        homeworkId: Long,
+        requestCode: Int,
+        epochDay: Long?,
+        content: String,
+        triggerAtMillis: Long,
     ): AlarmScheduleResult {
         val manager = alarmManager ?: return AlarmScheduleResult.NotScheduled
         // PendingIntent 构造本身也可能被系统拒绝（如 PendingIntent 数量超限）：
         // 一并收敛为「未设置」，保证本方法对调用方**绝不抛异常**
-        val pendingIntent = runCatching { pendingIntentOf(homeworkId, content) }.getOrNull()
+        val pendingIntent = runCatching { pendingIntentOf(homeworkId, content, requestCode, epochDay) }.getOrNull()
             ?: return AlarmScheduleResult.NotScheduled
         return runCatching {
             if (canScheduleExactAlarms()) {
@@ -70,20 +112,30 @@ class AndroidHomeworkAlarmScheduler @Inject constructor(
         }
     }
 
-    override fun cancel(homeworkId: Long) {
+    /** 取消闹钟的公共路径：按请求码精确取消（PendingIntent 相等性不含 extras），失败即视为无可取消 */
+    private fun cancelAlarm(homeworkId: Long, requestCode: Int, epochDay: Long?) {
         val manager = alarmManager ?: return
-        // 请求码由作业 id 稳定映射，取消无需携带内容（PendingIntent 的相等性不含 extras）；
-        // 取消同样不抛异常（幂等语义：失败等同于「没有可取消的闹钟」）
-        val pendingIntent = runCatching { pendingIntentOf(homeworkId, content = "") }.getOrNull() ?: return
+        val pendingIntent = runCatching {
+            pendingIntentOf(homeworkId, content = "", requestCode = requestCode, epochDay = epochDay)
+        }.getOrNull() ?: return
         runCatching { manager.cancel(pendingIntent) }
     }
 
-    /** 构造与作业一一对应的广播 PendingIntent（同一作业的多次调用等价，可互相覆盖/取消） */
-    private fun pendingIntentOf(homeworkId: Long, content: String): PendingIntent =
+    /**
+     * 构造与「作业（+ 自然日）」一一对应的广播 PendingIntent：
+     * 同一请求码的多次调用等价，可互相覆盖/取消；[epochDay] 一并进 Intent，
+     * 供到点投递时核对「这一天的打卡状态」（已完成则静默不打扰）。
+     */
+    private fun pendingIntentOf(
+        homeworkId: Long,
+        content: String,
+        requestCode: Int,
+        epochDay: Long?,
+    ): PendingIntent =
         PendingIntent.getBroadcast(
             context,
-            TimerReminderRules.requestCodeOf(homeworkId),
-            HomeworkAlarmReceiver.intentOf(context, homeworkId, content),
+            requestCode,
+            HomeworkAlarmReceiver.intentOf(context, homeworkId, content, epochDay),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 }

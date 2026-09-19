@@ -1,6 +1,7 @@
 package com.assignmate.app.homework.data
 
 import com.assignmate.app.auth.domain.Role
+import com.assignmate.app.core.domain.homework.HomeworkDailyRecord
 import com.assignmate.app.homework.domain.HomeworkItem
 import com.assignmate.app.homework.domain.HomeworkStatus
 import com.assignmate.app.homework.domain.HomeworkTemplate
@@ -45,11 +46,24 @@ interface HomeworkRepository {
     /** 按 id 读取作业项（不存在返回 null） */
     suspend fun getHomework(homeworkId: Long): HomeworkItem?
 
+    /**
+     * 读取某学生**全部作业的每天详情**（键 = 作业 id，值 = 该作业按自然日升序的全部天详情）。
+     *
+     * 数据来源是 core 的「作业每天详情」契约（[com.assignmate.app.core.domain.homework.HomeworkDailyRecordRepository]），
+     * homework 模块不直接访问 Room DAO。清单页据此推导「今日状态」与阶段进度（已打卡 N/M 天）。
+     *
+     * 默认返回空表：仅依赖清单快照的既有调用方/替身无需实现本方法即可编译。
+     */
+    suspend fun dailyRecordsOf(studentId: Long): Map<Long, List<HomeworkDailyRecord>> = emptyMap()
+
+    /** 读取单条作业的全部每天详情（按自然日升序；无记录返回空表） */
+    suspend fun dailyRecords(homeworkId: Long): List<HomeworkDailyRecord> = emptyList()
+
     // ---- 录入 ----
 
     /**
-     * 新增作业：按 [HomeworkTemplate] 展开为一条或多条作业项（阶段作业逐日一条），
-     * 初始状态为「已记录」、未排定开始时间，优先级追加到清单末尾。
+     * 新增作业：按 [HomeworkTemplate] 落库**恰好 1 条**作业项（阶段作业同样只 1 条，
+     * 阶段范围只决定覆盖起止日与进度分母），初始状态为「已记录」、未排定开始时间，优先级追加到清单末尾。
      *
      * 归属校验：家长归属 id 取当前会话；学生会话下 [studentId] 必须等于会话学生 id，
      * 否则返回 [AddHomeworkResult.NoActiveSession]（防止绕过 UI 指向他人学生）。
@@ -81,8 +95,12 @@ interface HomeworkRepository {
     // ---- 时间排定 ----
 
     /**
-     * 设定开始时间与预估时长：先校验 deadline 约束与时间段防冲突（排除自身），
+     * 设定开始时间与预估时长：先校验截止时间约束与时间段防冲突（排除自身），
      * 通过后写入并将状态推进到「待完成」（已记录 → 待完成）。
+     *
+     * 截止时间按作业类型分两种语义（见 [com.assignmate.app.homework.domain.HomeworkDailyDeadlineCodec]）：
+     * - 当天作业：开始时间 + 预估时长不得晚于绝对 deadline；
+     * - 阶段作业：开始时刻 + 预估时长不得跨过「该天每日截止时刻」。
      *
      * 权限（执行权，见 HomeworkValidators.canOperate）：家长可排定名下学生全部作业；
      * 学生可排定**本人名下**全部作业（含家长布置的），否则「家长布置 → 学生计时完成」主闭环不可用。
@@ -120,7 +138,10 @@ interface HomeworkRepository {
 
     /**
      * 修改作业类型 / 阶段范围 / 截止时间（家长专属）：改为阶段作业必须带阶段范围，
-     * 家长录入的阶段作业必须设 deadline（校验不过返回 [HomeworkOperationResult.TemplateInvalid]）；
+     * 家长录入的阶段作业必须设**每日截止时刻**（阶段作业的 deadline 只承载 time-of-day，
+     * 由 [com.assignmate.app.homework.domain.HomeworkDailyDeadlineCodec] 编解码；
+     * 校验不过返回 [HomeworkOperationResult.TemplateInvalid]）；
+     * 新截止取值还必须容纳既有排定时间段（阶段按该天截止时刻、当天按绝对 deadline）；
      * 学生会话调用一律返回 [HomeworkOperationResult.PermissionDenied]。
      */
     suspend fun updateTemplate(
@@ -147,10 +168,24 @@ interface HomeworkRepository {
     /** 开始作业：待完成 → 进行中（timer 模块后续经此入口写入） */
     suspend fun startProgress(homeworkId: Long, sessionRole: Role): HomeworkStatusResult
 
-    /** 完成作业：待完成/进行中 → 已完成 */
+    /**
+     * 标记完成：**按类型分流**（阶段作业「当天完成 ≠ 整条完成」，本模块对外契约之一）——
+     * - 当天作业（TODAY）：完成即整条置 [HomeworkStatus.COMPLETED]（语义不变）；
+     * - 阶段作业（STAGE）：只把**今天**记入「作业每天详情」，整条状态按每天进度收敛：
+     *   阶段覆盖日全部完成才置 [HomeworkStatus.COMPLETED]；仍有未完成的天则回到
+     *   [HomeworkStatus.PENDING]（「整条还没走完」）——该状态在 timer 的可开始集合
+     *   （`STARTABLE_STATUSES = {PENDING, IN_PROGRESS}`）内，故**阶段范围内每一天都可直接开始计时，
+     *   不需要先「撤销完成」**；阶段已结束但仍有未完成天时同样不置已完成（由清单页归入「已结束」）。
+     *   今天不在阶段覆盖区间内（阶段尚未开始或已结束）时返回
+     *   [HomeworkStatusResult.IllegalTransition]，且不写入每天详情。
+     */
     suspend fun complete(homeworkId: Long, sessionRole: Role): HomeworkStatusResult
 
-    /** 撤销完成：已完成 → 进行中（纠正误标记） */
+    /**
+     * 撤销完成：当天作业为「已完成 → 进行中」；阶段作业撤销的是**今天**的完成记录
+     * （今天回到「未开始」并清空执行数据，整条回到 [HomeworkStatus.PENDING]），今天可重新开始计时。
+     * 阶段作业今天没有完成记录时返回 [HomeworkStatusResult.IllegalTransition]。
+     */
     suspend fun reopen(homeworkId: Long, sessionRole: Role): HomeworkStatusResult
 }
 
@@ -167,10 +202,10 @@ enum class ReorderDirection {
 /** 新增作业结果 */
 sealed class AddHomeworkResult {
 
-    /** 新增成功：返回落库后的全部作业项（阶段作业为逐日多条） */
+    /** 新增成功：返回落库后的作业项（阶段作业同样只 1 条） */
     data class Success(val items: List<HomeworkItem>) : AddHomeworkResult()
 
-    /** 模板校验失败（内容为空/超长、缺阶段范围、家长阶段作业缺 deadline 等） */
+    /** 模板校验失败（内容为空/超长、缺阶段范围、家长阶段作业缺每日截止时刻等） */
     data class TemplateInvalid(val error: HomeworkValidationError) : AddHomeworkResult()
 
     /** 无有效会话（缺少家长归属维度；或目标学生不在会话可见范围内） */

@@ -5,12 +5,14 @@ import androidx.lifecycle.viewModelScope
 import com.assignmate.app.auth.data.AuthRepository
 import com.assignmate.app.auth.domain.Role
 import com.assignmate.app.auth.domain.SessionState
+import com.assignmate.app.core.domain.homework.HomeworkDailyRecord
 import com.assignmate.app.core.domain.time.Clock
 import com.assignmate.app.homework.data.HomeworkOrderResult
 import com.assignmate.app.homework.data.HomeworkOperationResult
 import com.assignmate.app.homework.data.HomeworkRepository
 import com.assignmate.app.homework.data.HomeworkStatusResult
 import com.assignmate.app.homework.data.ReorderDirection
+import com.assignmate.app.homework.domain.HomeworkDayState
 import com.assignmate.app.homework.domain.HomeworkItem
 import com.assignmate.app.homework.domain.HomeworkStatus
 import com.assignmate.app.homework.domain.HomeworkValidators
@@ -39,7 +41,11 @@ import kotlinx.coroutines.launch
  * - 「已记录」项可进入时间设定；排定成功后仓库自动推进为「待完成」；
  * - 「待完成」项可「开始作业」（导航到计时页）与「标记完成」；
  * - 「进行中」项锁定调序与时间排定（需求假设 C），仅可「标记完成」或继续计时；
- * - 「已完成」项可撤销完成（completed → in_progress），便于纠正误标记。
+ * - 「已完成」项可撤销完成（completed → in_progress），便于纠正误标记；
+ * - **阶段作业的「完成」是「完成今天」**：仓库只把今天记进每天详情，整条状态按每天进度收敛——
+ *   阶段未走完时保持「待完成」（本页因此仍展示「开始作业」入口，第二天无需先撤销完成；
+ *   行内以「今日：已完成 + 阶段进度：已打卡 N/M 天」表达当天进度），全部覆盖日完成才置「已完成」；
+ *   今天已完成时改为展示「撤销完成」（撤销今天的完成记录）。
  *
  * 数据来源：仓库 observeHomework 单数据流（StateFlow 暴露给 UI），
  * 一次性提示走 Channel 事件，避免重组误触发。
@@ -54,7 +60,12 @@ class HomeworkListViewModel @Inject constructor(
     private val homeworkRepository: HomeworkRepository,
     private val authRepository: AuthRepository,
     private val clock: Clock,
-    private val zoneId: ZoneId,
+    /**
+     * 业务时区：由 core 的**唯一**业务时区绑定注入（homework 不自建绑定），
+     * 既是本页「今天」口径的唯一来源，也经 [zoneId] 暴露给页面用于展示格式化，
+     * 避免 Compose 侧再以 `ZoneId.systemDefault()` 兜底造成覆写绑定后展示口径漂移。
+     */
+    val zoneId: ZoneId,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(HomeworkListUiState())
@@ -118,24 +129,67 @@ class HomeworkListViewModel @Inject constructor(
         viewModelScope.launch {
             authRepository.observeSession()
                 .flatMapLatest { session -> observeForStudent(session, studentId) }
-                .collect { items ->
-                    _uiState.update { state ->
-                        state.copy(
-                            items = items.mapIndexed { index, item ->
-                                // 调序用改删权 + 归属维度（学生不可调他人名下项）+ 进行中锁定；
-                                // 完成/撤销完成用执行权
-                                val movable = canReorder(state.role, item, state.sessionStudentId) &&
-                                    item.status != HomeworkStatus.IN_PROGRESS
-                                item.toRow(
-                                    role = state.role,
-                                    sessionStudentId = state.sessionStudentId,
-                                    canMoveUp = index > 0 && movable,
-                                    canMoveDown = index < items.lastIndex && movable,
-                                )
-                            },
-                        )
-                    }
-                }
+                .collect { items -> applyItems(items) }
+        }
+    }
+
+    /**
+     * 应用一次清单快照：拉取「作业每天详情」并重算每行的每日维度（今日状态 / 阶段进度）+ 角色口径分组。
+     *
+     * 「作业每天详情」是状态与进度的唯一数据来源（core 契约）；状态流转落库后经
+     * [refreshDailyRecordsNow] 主动刷新，保证「标记完成」后今日状态与进度即时更新。
+     */
+    private suspend fun applyItems(items: List<HomeworkItem>) {
+        val state = _uiState.value
+        val records = runCatching { homeworkRepository.dailyRecordsOf(state.studentId ?: 0L) }
+            .getOrDefault(emptyMap())
+        _uiState.update { it.copy(allItems = items, items = buildRows(items, records, it)) }
+    }
+
+    /** 由清单快照 + 每天详情 + 会话推导全部行（含角色口径过滤与分组归属） */
+    private fun buildRows(
+        items: List<HomeworkItem>,
+        records: Map<Long, List<HomeworkDailyRecord>>,
+        state: HomeworkListUiState,
+    ): List<HomeworkRowUiState> {
+        val recordsOf: (Long) -> List<HomeworkDailyRecord> = { id -> records[id].orEmpty() }
+        // 学生只看当天（阶段开始前不显示、结束后移出）；家长看全部
+        val visible = HomeworkListRoleScope.visibleForDay(
+            items = items,
+            role = state.role,
+            todayEpochDay = state.todayEpochDay,
+            zoneId = zoneId,
+        )
+        val groups = HomeworkListRoleScope.group(
+            items = visible,
+            recordsOf = recordsOf,
+            todayEpochDay = state.todayEpochDay,
+            zoneId = zoneId,
+        )
+        val sections = buildMap {
+            groups.main.forEach { item -> put(item.id, HomeworkListSection.MAIN) }
+            groups.completedHistory.forEach { item -> put(item.id, HomeworkListSection.COMPLETED_HISTORY) }
+            groups.ended.forEach { item -> put(item.id, HomeworkListSection.ENDED) }
+        }
+        val ordered = groups.main + groups.completedHistory + groups.ended
+        return ordered.mapIndexed { index, item ->
+            val timeline = HomeworkListRoleScope.rowTimeline(
+                item = item,
+                records = recordsOf(item.id),
+                todayEpochDay = state.todayEpochDay,
+                zoneId = zoneId,
+            )
+            val movable = canReorder(state.role, item, state.sessionStudentId) &&
+                item.status != HomeworkStatus.IN_PROGRESS
+            item.toRow(
+                role = state.role,
+                sessionStudentId = state.sessionStudentId,
+                canMoveUp = index > 0 && movable,
+                canMoveDown = index < ordered.lastIndex && movable,
+                timeline = timeline,
+                section = sections[item.id] ?: HomeworkListSection.MAIN,
+                missedDayCount = groups.endedMissedDayCounts[item.id] ?: 0,
+            )
         }
     }
 
@@ -183,9 +237,18 @@ class HomeworkListViewModel @Inject constructor(
             add(targetIndex, moved)
         }
         _uiState.update { state ->
+            val timelineOf: (HomeworkItem) -> HomeworkRowTimeline = { item ->
+                rows.firstOrNull { row -> row.homework.id == item.id }?.timeline
+                    ?: HomeworkRowTimeline(
+                        todayState = null,
+                        stageProgress = null,
+                        isTodayActionable = false,
+                    )
+            }
+            val sections = rows.associate { row -> row.homework.id to row.section }
             state.copy(
+                // 重新推导整行（进行中锁定与越权项保持不可调序，避免本地交换绕过守卫）
                 items = swapped.mapIndexed { i, row ->
-                    // 重新推导整行（进行中锁定与越权项保持不可调序，避免本地交换绕过守卫）
                     val movable = canReorder(state.role, row.homework, state.sessionStudentId) &&
                         !row.lockedWorkInProgress
                     row.homework.toRow(
@@ -193,6 +256,9 @@ class HomeworkListViewModel @Inject constructor(
                         sessionStudentId = state.sessionStudentId,
                         canMoveUp = i > 0 && movable,
                         canMoveDown = i < swapped.lastIndex && movable,
+                        timeline = timelineOf(row.homework),
+                        section = sections[row.homework.id] ?: HomeworkListSection.MAIN,
+                        missedDayCount = row.missedDayCount,
                     )
                 },
             )
@@ -258,20 +324,29 @@ class HomeworkListViewModel @Inject constructor(
         val role = _uiState.value.role ?: return
         viewModelScope.launch {
             val result = homeworkRepository.startProgress(homeworkId, role)
+            if (result is HomeworkStatusResult.Success) {
+                // 开始作业写入「作业每天详情」（当天 → 进行中），刷新后行状态即时正确
+                refreshDailyRecordsNow()
+            }
             sendMessage(result.toStartMessage())
         }
     }
 
-    /** 标记完成：待完成/进行中 → 已完成（执行权：本人名下作业） */
+    /** 标记完成：待完成/进行中 → 已完成（执行权：本人名下作业；阶段作业为「完成今天」） */
     fun onCompleteClick(homeworkId: Long) {
         val row = _uiState.value.items.firstOrNull { it.homework.id == homeworkId } ?: return
         if (!row.canComplete) {
+            // 入口不可用统一按执行权提示：阶段作业今天已完成/在窗口外时按钮本就不渲染
             sendMessage(EXECUTE_PERMISSION_DENIED_HINT)
             return
         }
         val role = _uiState.value.role ?: return
         viewModelScope.launch {
             val result = homeworkRepository.complete(homeworkId, role)
+            if (result is HomeworkStatusResult.Success) {
+                // 完成写入「作业每天详情」（当天 → 已完成），刷新后今日状态与阶段进度即时更新
+                refreshDailyRecordsNow()
+            }
             val message = when (result) {
                 is HomeworkStatusResult.Success -> "已标记完成"
                 HomeworkStatusResult.NotFound -> "作业不存在，可能已被删除"
@@ -291,6 +366,10 @@ class HomeworkListViewModel @Inject constructor(
         val role = _uiState.value.role ?: return
         viewModelScope.launch {
             val result = homeworkRepository.reopen(homeworkId, role)
+            if (result is HomeworkStatusResult.Success) {
+                // 撤销完成同样回退「作业每天详情」（当天 → 未开始）
+                refreshDailyRecordsNow()
+            }
             val message = when (result) {
                 is HomeworkStatusResult.Success -> "已撤销完成"
                 HomeworkStatusResult.NotFound -> "作业不存在，可能已被删除"
@@ -301,9 +380,22 @@ class HomeworkListViewModel @Inject constructor(
         }
     }
 
+    /** 刷新「作业每天详情」并重算全部行（挂起：由状态流转链路内联调用，保证顺序） */
+    private suspend fun refreshDailyRecordsNow() {
+        val state = _uiState.value
+        val studentId = state.studentId ?: return
+        val records = runCatching { homeworkRepository.dailyRecordsOf(studentId) }.getOrDefault(emptyMap())
+        _uiState.update { it.copy(items = buildRows(state.allItems, records, it)) }
+    }
+
     /** 提示：受权限限制的操作（UI 已禁用按钮，此处兜底） */
     fun onPermissionDenied() {
         sendMessage(PERMISSION_DENIED_HINT)
+    }
+
+    /** 家长视角「已完成历史」分组展开/折叠（默认折叠） */
+    fun onToggleCompletedHistory() {
+        _uiState.update { it.copy(completedExpanded = !it.completedExpanded) }
     }
 
     // ---- 私有工具 ----
@@ -329,11 +421,17 @@ class HomeworkListViewModel @Inject constructor(
         sessionStudentId: Long?,
         canMoveUp: Boolean,
         canMoveDown: Boolean,
+        timeline: HomeworkRowTimeline,
+        section: HomeworkListSection,
+        missedDayCount: Int,
     ): HomeworkRowUiState = toRowUiState(
         role = role,
         sessionStudentId = sessionStudentId,
         canMoveUp = canMoveUp,
         canMoveDown = canMoveDown,
+        timeline = timeline,
+        section = section,
+        missedDayCount = missedDayCount,
     )
 
     /** 当前自然日（epochDay）：按业务时区折算，保证「今天」口径与页面展示一致 */
@@ -354,6 +452,13 @@ data class HomeworkListUiState(
     val sessionStudentId: Long? = null,
     val todayEpochDay: Long = 0L,
     val items: List<HomeworkRowUiState> = emptyList(),
+    /**
+     * 最近一次清单快照的全部作业（未按角色口径过滤）：状态流转后刷新每天详情时用它重算，
+     * 避免用「已过滤/已分组」的行反推清单导致不可见项丢失。
+     */
+    val allItems: List<HomeworkItem> = emptyList(),
+    /** 「已完成历史」分组是否展开（家长视角；默认折叠，避免历史项挤占当天清单） */
+    val completedExpanded: Boolean = false,
     val deleteTarget: HomeworkItem? = null,
     val deleting: Boolean = false,
 ) {
@@ -370,7 +475,25 @@ data class HomeworkListUiState(
     val statsStudentId: Long? get() = studentId.takeIf { !missingSession && !missingStudent }
 }
 
-/** 清单条目状态：作业数据 + 按角色计算的权限开关 */
+/**
+ * 清单分区（角色口径分组）：
+ * - [MAIN]：进行区（学生视角下为「今天」的全部作业）；
+ * - [COMPLETED_HISTORY]：已完成历史（家长视角折叠展示）；
+ * - [ENDED]：已结束（阶段已结束但仍有未完成天，标注未完成天数）。
+ */
+enum class HomeworkListSection {
+    MAIN,
+    COMPLETED_HISTORY,
+    ENDED,
+}
+
+/**
+ * 清单条目状态：作业数据 + 按角色计算的权限开关 + 每日维度（今日状态 / 阶段进度）。
+ *
+ * @param timeline 由作业每天详情推导的今日状态与阶段进度（[HomeworkListRoleScope.rowTimeline]）
+ * @param section 分区归属（家长视角分组用；学生视角全部为 [HomeworkListSection.MAIN]）
+ * @param missedDayCount 阶段作业的未完成天数（缺卡天数；「已结束」分组标注用）
+ */
 data class HomeworkRowUiState(
     val homework: HomeworkItem,
     /** 改删/调序权限：学生仅可操作自己录入的作业（[HomeworkValidators.canModify]） */
@@ -384,7 +507,7 @@ data class HomeworkRowUiState(
      * 已记录（RECORDED）需先排定时间，已完成（COMPLETED）不可再开始，故均不展示该入口。
      */
     val canStart: Boolean,
-    /** 执行权：可推进状态至完成（本人名下作业，且处于待完成/进行中） */
+    /** 执行权：可推进状态至完成（本人名下作业，且处于待完成/进行中；阶段作业还要求今天在阶段内且未缺卡） */
     val canComplete: Boolean,
     /** 执行权：已完成项可撤销完成（本人名下作业） */
     val canReopen: Boolean,
@@ -392,6 +515,34 @@ data class HomeworkRowUiState(
     val lockedWorkInProgress: Boolean,
     val canMoveUp: Boolean,
     val canMoveDown: Boolean,
+    /** 每日维度：今日状态 + 阶段进度（默认空，兼容既有构造调用） */
+    val timeline: HomeworkRowTimeline = EMPTY_TIMELINE,
+    /** 分区归属（默认进行区，兼容既有构造调用） */
+    val section: HomeworkListSection = HomeworkListSection.MAIN,
+    /** 阶段作业的未完成天数（缺卡天数） */
+    val missedDayCount: Int = 0,
+) {
+
+    /** 今日状态文案（如「今日：已完成」） */
+    val todayStateText: String? get() = timeline.todayStateText
+
+    /** 阶段进度文案（如「阶段进度：已打卡 3/7 天」；非阶段作业为 null） */
+    val stageProgressText: String? get() = timeline.progressText
+
+    /** 「已结束」分组的未完成天数文案 */
+    val missedDaysText: String?
+        get() = if (section == HomeworkListSection.ENDED && missedDayCount > 0) {
+            "阶段已结束，有 $missedDayCount 天未完成"
+        } else {
+            null
+        }
+}
+
+/** 空每日维度（非每日数据场景的占位，保证行模型可独立构造） */
+internal val EMPTY_TIMELINE = HomeworkRowTimeline(
+    todayState = null,
+    stageProgress = null,
+    isTodayActionable = false,
 )
 
 /**
@@ -401,7 +552,14 @@ data class HomeworkRowUiState(
  * - 改删/调序用 [HomeworkValidators.canModify]（学生仅自己录入项，家长全部）；
  * - 时间排定与状态流转用 [HomeworkValidators.canOperate]（学生可为本人名下全部作业，
  *   含家长布置的，保证「家长布置 → 学生排定时间 → 计时完成」主闭环可用）；
- * 「标记完成」仅在待完成/进行中可用（已记录需先排定时间，见 [HomeworkStatus] 流转表）。
+ * 「标记完成」仅在待完成/进行中可用（已记录需先排定时间，见 [HomeworkStatus] 流转表）；
+ * 阶段作业额外要求「今天落在阶段覆盖窗口内且尚未完成」——阶段窗口外（尚未开始/已结束）
+ * 与今天已完成时都不再开放「开始作业 / 标记完成」，与仓库「完成今天」的口径同源；
+ * 今天已完成时改为开放「撤销完成」（撤销的是**今天**的完成记录，整条回到待完成）。
+ *
+ * **缺卡（[HomeworkDayState.MISSED]）不是「今天」可能的状态**：按缺卡规则，当天即便已过每日截止
+ * 时刻仍可完成（[StageDayRecords]），只有**跨入次日**才判为未完成——因此行投影里不存在
+ * 「今天缺卡」这一态，也不再有针对它的防御分支与提示文案（缺卡只体现在阶段进度的未完成天数上）。
  *
  * 进行中锁定（[lockedWorkInProgress]）：状态为「进行中」时不允许调序与改时间，
  * 故 [canSchedule] 为 false、调序按钮同样不可用（调序开关见 [HomeworkRowUiState.canMoveUp]/
@@ -412,23 +570,42 @@ internal fun HomeworkItem.toRowUiState(
     sessionStudentId: Long?,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
+    timeline: HomeworkRowTimeline = EMPTY_TIMELINE,
+    section: HomeworkListSection = HomeworkListSection.MAIN,
+    missedDayCount: Int = 0,
 ): HomeworkRowUiState {
     val executable = role != null && HomeworkValidators.canOperate(this, role, sessionStudentId)
     val locked = status == HomeworkStatus.IN_PROGRESS
     val unfinished = status != HomeworkStatus.COMPLETED
-    val completable = executable &&
-        (status == HomeworkStatus.PENDING || status == HomeworkStatus.IN_PROGRESS)
+    val statusAllowsComplete =
+        status == HomeworkStatus.PENDING || status == HomeworkStatus.IN_PROGRESS
+    // 阶段作业：只有「今天在阶段窗口内且尚未完成」才谈得上开始/完成今天（口径同 StageDayRecords：
+    // 今天到点后仍可完成、跨入次日才判未完成；今天已完成则不再重复完成）；
+    // 每天详情缺失（默认空投影）时不误伤既有口径。当天作业不受本维度约束（由状态列表达）。
+    val dayAllowsAction = if (isStage) timeline.todayState?.isActionable ?: true else true
+    // 阶段作业的时间排定同样受阶段窗口约束：阶段尚未开始的将来日与已结束的阶段都不该再排定时间
+    // （当天仍在阶段内时照常可排定；每日数据缺失时不误伤既有口径）
+    val dayAllowsSchedule = if (isStage) timeline.todayState != HomeworkDayState.NOT_ARRIVED else true
     return HomeworkRowUiState(
         homework = this,
         canModify = role != null && HomeworkValidators.canModify(this, role),
         canDelete = role != null && HomeworkValidators.canDelete(this, role),
-        canSchedule = unfinished && !locked && executable,
-        canStart = executable && (status == HomeworkStatus.PENDING || status == HomeworkStatus.IN_PROGRESS),
-        canComplete = completable,
-        canReopen = !unfinished && executable,
+        canSchedule = unfinished && !locked && executable && dayAllowsSchedule,
+        canStart = executable && statusAllowsComplete && dayAllowsAction,
+        canComplete = executable && statusAllowsComplete && dayAllowsAction,
+        // 阶段作业的「撤销完成」= 撤销今天的完成（仅今天已有完成记录时开放）；
+        // 当天作业沿用「整条已完成 → 可撤销完成」的既有口径
+        canReopen = if (isStage) {
+            executable && timeline.todayState == HomeworkDayState.COMPLETED
+        } else {
+            !unfinished && executable
+        },
         lockedWorkInProgress = locked,
         canMoveUp = canMoveUp,
         canMoveDown = canMoveDown,
+        timeline = timeline,
+        section = section,
+        missedDayCount = missedDayCount,
     )
 }
 

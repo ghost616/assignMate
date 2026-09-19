@@ -39,6 +39,7 @@ import com.assignmate.app.core.ui.components.CoreLoadingPlaceholder
 import com.assignmate.app.homework.domain.HomeworkItem
 import com.assignmate.app.homework.domain.HomeworkStatus
 import java.time.ZoneId
+import kotlinx.coroutines.flow.filterNotNull
 
 /** 顶部并排大按钮的宽度：与「添加作业」按钮同高（56dp），避免占满整宽挤掉返回入口 */
 private val INLINE_BIG_BUTTON_WIDTH = 160.dp
@@ -58,6 +59,10 @@ private val INLINE_BIG_BUTTON_WIDTH = 160.dp
  *
  * 顶部「查看盘点」入口同样只以回调 [onOpenStats] 暴露导航意图（默认空实现），
  * 不引入 stats 模块依赖，接线由 framework 计划完成。
+ *
+ * 本页同时是「保存成功」提示的展示点：录入 / 模板 / 时间设定三个页面保存成功后**先回清单**
+ * （onSaved），再由本页展示其文案（见 [homeworkSaveNotice] 与 [dispatchSaveCompletion]）——
+ * 保存页因此无需 await 提示条，也不会因离开组合而丢掉提示或提醒同步。
  */
 @Composable
 fun HomeworkListRoute(
@@ -99,6 +104,16 @@ fun HomeworkListRoute(
             }
         }
     }
+    // 保存成功提示的**跨页展示点**：录入 / 模板 / 时间设定三个页面保存后先回清单（onSaved），
+    // 再以非挂起方式把文案写入 homeworkSaveNotice；本页据此展示，故提示既不阻塞导航也不会丢失
+    // （StateFlow 会把待展示值重放给本页新组合，见 HomeworkSaveNoticeHolder）。
+    // 用 Short：确认性提示无需 Long 的 10 秒驻留，也不至于长时间占用清单页的提示队列。
+    LaunchedEffect(homeworkSaveNotice) {
+        homeworkSaveNotice.notice.filterNotNull().collect { message ->
+            snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Short)
+            homeworkSaveNotice.consume(message)
+        }
+    }
     val callbacks = HomeworkListCallbacks(
         onBack = onBack,
         onAddHomework = onAddHomework,
@@ -114,6 +129,7 @@ fun HomeworkListRoute(
         onStart = viewModel::onStartHomeworkClick,
         onComplete = viewModel::onCompleteClick,
         onReopen = viewModel::onReopenClick,
+        onToggleCompleted = viewModel::onToggleCompletedHistory,
     )
     Scaffold(
         modifier = modifier,
@@ -122,6 +138,9 @@ fun HomeworkListRoute(
         HomeworkListContent(
             uiState = uiState,
             callbacks = callbacks,
+            // 业务时区来自 ViewModel 注入的 core 唯一绑定：页面展示（时间/截止格式化）与
+            // 仓库「今天」口径因此同源，覆写该绑定即全局生效（不再以 systemDefault 兜底）
+            zoneId = viewModel.zoneId,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
@@ -154,15 +173,22 @@ class HomeworkListCallbacks(
     val onOpenStats: (studentId: Long) -> Unit = {},
     /** 「开始作业」：把作业推进为「进行中」（执行权校验 + 仓库兜底） */
     val onStart: (Long) -> Unit = {},
+    /** 「已完成历史」分组展开/折叠（家长视角；学生视角不渲染该分组） */
+    val onToggleCompleted: () -> Unit = {},
 )
 
-/** 清单页内容（无状态，便于预览与测试） */
+/**
+ * 清单页内容（无状态，便于预览与测试）。
+ *
+ * @param zoneId 业务时区：由 [HomeworkListRoute] 透传 ViewModel 注入的 core 唯一绑定，
+ *   **刻意不带默认值**（默认 `systemDefault()` 会让覆写绑定后的展示口径漂移）
+ */
 @Composable
 fun HomeworkListContent(
     uiState: HomeworkListUiState,
     callbacks: HomeworkListCallbacks,
+    zoneId: ZoneId,
     modifier: Modifier = Modifier,
-    zoneId: ZoneId = ZoneId.systemDefault(),
 ) {
     Column(modifier = modifier.padding(horizontal = 20.dp)) {
         Spacer(modifier = Modifier.height(12.dp))
@@ -225,13 +251,38 @@ fun HomeworkListContent(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(uiState.items, key = { it.homework.id }) { row ->
-                    HomeworkRow(
-                        row = row,
-                        role = uiState.role,
-                        callbacks = callbacks,
-                        zoneId = zoneId,
-                    )
+                // 家长视角：已完成折叠入「已完成历史」；阶段已结束但仍有未完成天的归「已结束」并标注未完成天数。
+                // 学生视角：只看当天，全部落在进行区（无分组标题）。
+                val mainRows = uiState.items.filter { it.section == HomeworkListSection.MAIN }
+                val completedRows = uiState.items.filter {
+                    it.section == HomeworkListSection.COMPLETED_HISTORY
+                }
+                val endedRows = uiState.items.filter { it.section == HomeworkListSection.ENDED }
+                if (uiState.role == Role.PARENT && mainRows.isNotEmpty()) {
+                    item { SectionHeader(text = "今天 · 进行中") }
+                }
+                items(mainRows, key = { it.homework.id }) { row ->
+                    HomeworkRow(row = row, role = uiState.role, callbacks = callbacks, zoneId = zoneId)
+                }
+                if (uiState.role == Role.PARENT && endedRows.isNotEmpty()) {
+                    item { SectionHeader(text = "已结束") }
+                    items(endedRows, key = { it.homework.id }) { row ->
+                        HomeworkRow(row = row, role = uiState.role, callbacks = callbacks, zoneId = zoneId)
+                    }
+                }
+                if (uiState.role == Role.PARENT && completedRows.isNotEmpty()) {
+                    item {
+                        SectionHeader(
+                            text = "已完成历史（${completedRows.size}）",
+                            expanded = uiState.completedExpanded,
+                            onClick = callbacks.onToggleCompleted,
+                        )
+                    }
+                    if (uiState.completedExpanded) {
+                        items(completedRows, key = { it.homework.id }) { row ->
+                            HomeworkRow(row = row, role = uiState.role, callbacks = callbacks, zoneId = zoneId)
+                        }
+                    }
                 }
                 item { Spacer(modifier = Modifier.height(16.dp)) }
             }
@@ -249,14 +300,18 @@ fun HomeworkListContent(
     }
 }
 
-/** 单条作业卡片：优先级调序 + 信息 + 状态标签 + 操作区（按权限禁用/隐藏） */
+/**
+ * 单条作业卡片：优先级调序 + 信息 + 状态标签 + 操作区（按权限禁用/隐藏）。
+ *
+ * @param zoneId 业务时区（展示格式化用；由 [HomeworkListContent] 透传，刻意不带默认值）
+ */
 @Composable
 fun HomeworkRow(
     row: HomeworkRowUiState,
     role: Role?,
     callbacks: HomeworkListCallbacks,
+    zoneId: ZoneId,
     modifier: Modifier = Modifier,
-    zoneId: ZoneId = ZoneId.systemDefault(),
 ) {
     val item = row.homework
     Card(modifier = modifier.fillMaxWidth()) {
@@ -293,12 +348,22 @@ fun HomeworkRow(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (item.deadline != null) {
+            // 截止时间：当天作业为「日期 + 时刻」，阶段作业只展示「每日时刻」（如「每天 21:00 截止」）
+            item.deadlineLabel { millis -> TimeFormatters.formatDateTime(millis, zoneId) }?.let { text ->
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "截止：${TimeFormatters.formatDateTime(item.deadline.toEpochMilli(), zoneId)}",
+                    text = text,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error,
+                )
+            }
+            // 阶段覆盖区间（阶段作业）：展示阶段结束日与「每天到点截止」说明
+            row.timeline.coverageText?.let { text ->
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Spacer(modifier = Modifier.height(6.dp))
@@ -311,6 +376,24 @@ fun HomeworkRow(
                     text = item.createdByRole.label,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // 每日维度：今日状态 + 阶段进度（均由「作业每天详情」推导）
+            if (row.todayStateText != null || row.stageProgressText != null) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = listOfNotNull(row.todayStateText, row.stageProgressText).joinToString("　"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            // 「已结束」分组标注未完成天数
+            row.missedDaysText?.let { text ->
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
             Spacer(modifier = Modifier.height(6.dp))
@@ -397,8 +480,34 @@ fun HomeworkRow(
     }
 }
 
-/** 状态标签（颜色区分：已完成为主色，进行中为次要色，其余中性） */
+/**
+ * 分组标题：家长视角下「今天 · 进行中」/「已结束」为静态标题，
+ * 「已完成历史」可点击展开/折叠（[onClick] 非空时渲染为可点击行）。
+ */
 @Composable
+private fun SectionHeader(
+    text: String,
+    expanded: Boolean? = null,
+    onClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    val label = if (expanded == null) text else "$text ${if (expanded) "▾" else "▸"}"
+    if (onClick == null) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = modifier.padding(top = 4.dp),
+        )
+    } else {
+        TextButton(onClick = onClick, modifier = modifier) {
+            Text(text = label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+/** 状态标签（颜色区分：已完成为主色，进行中为次要色，其余中性） */@Composable
 fun StatusChip(status: HomeworkStatus, modifier: Modifier = Modifier) {
     val color = when (status) {
         HomeworkStatus.COMPLETED -> MaterialTheme.colorScheme.primary

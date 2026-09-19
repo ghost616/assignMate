@@ -1,4 +1,4 @@
-﻿package com.assignmate.app.timer.data
+package com.assignmate.app.timer.data
 
 import com.assignmate.app.auth.domain.Role
 import com.assignmate.app.auth.domain.SessionState
@@ -30,6 +30,9 @@ class TimerOwnershipFenceProbeTest {
     private companion object {
         const val NO_STUDENT_PARENT_ID = 7L
         const val OTHER_STUDENT_ID = 98L
+
+        /** `epoch_day` 的「未指定」哨兵（列默认值 0）：仅用于构造不涉及逐日归属的测试数据 */
+        const val UNSPECIFIED_EPOCH_DAY = 0L
     }
 
     // ---- 脏会话（缺角色维度）一律拒绝 ----
@@ -301,6 +304,8 @@ class TimerOwnershipFenceProbeTest {
             homeworkId = homeworkId,
             studentId = studentId,
             parentAccountId = TimerTestEnv.PARENT_ID,
+            // 本用例只验证越权围栏（不涉及逐日归属），按「未指定」哨兵 0 显式构造
+            epochDay = UNSPECIFIED_EPOCH_DAY,
             startedAt = Instant.ofEpochMilli(clock.currentTimeMillis()),
             finishedAt = null,
             pausedTotalMillis = 0L,
@@ -314,6 +319,8 @@ class TimerOwnershipFenceProbeTest {
             PauseRecordEntity(
                 sessionId = sessionId,
                 homeworkId = 1L,
+                // 未结束暂停明细同样按「未指定」哨兵显式构造（实体已无 Kotlin 默认值）
+                epochDay = UNSPECIFIED_EPOCH_DAY,
                 pauseStartAt = Instant.ofEpochMilli(clock.currentTimeMillis()),
                 pauseEndAt = null,
             ),
@@ -332,5 +339,6 @@ class TimerOwnershipFenceProbeTest {
         authRepository = authRepository,
         clock = clock,
         transactionRunner = transactionRunner,
+        dailyRecordRepository = dailyRecordRepository,
     )
 }

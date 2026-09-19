@@ -8,24 +8,22 @@ import com.assignmate.app.stats.domain.ItemDetail
  * 统计仓库接口：作业完成情况的盘点、单项详情与历史查询（**纯读取聚合**）。
  *
  * 数据来源与组合方式（不新增数据库表，只读既有落库数据）：
- * - homework 的 [com.assignmate.app.homework.data.HomeworkRepository]：作业清单与状态、预估时长、优先级；
- * - timer 的 [com.assignmate.app.timer.data.TimerRepository]：执行会话（loadSessionsByStudent）
- *   与暂停明细（loadPausesByHomework）；
+ * - homework 的 [com.assignmate.app.homework.data.HomeworkRepository]：作业清单（内容/类型/优先级/阶段覆盖日
+ *   与「当天作业归属日」所需的创建时刻、状态列）；
+ * - core 的 [com.assignmate.app.core.domain.homework.HomeworkDailyRecordRepository]：**作业每天详情**
+ *   （当天状态、当天预估/实际/暂停时长与暂停次数）——阶段作业「一条作业项 + 每天详情」改造后，
+ *   一切「某一天」的数据口径都以每天详情为准，本模块不再读取计时会话、也不自行裁剪时段；
  * - auth 的 [com.assignmate.app.auth.data.AuthRepository]：当前会话（角色/家长归属/学生）用于越权校验。
  *
  * **学生维度入参**：本接口的查询方法一律显式接收 `studentId`（由 UI 按路由参数 + 会话解析后传入），
  * 仓库层再按会话可见范围兜底校验，避免「家长多看一个学生」这类越权（与 homework/timer 同源口径）。
  *
- * **当日盘点口径（完成率分母）**：某作业纳入当日盘点的条件为三者之一——
- * 1. 当日产生了执行时长：会话时间段与当日窗口相交且裁剪后净耗时 > 0，
- *    含「前一日开始、跨零点仍在进行」的会话（按当日窗口裁剪计时，
- *    跨天暂停同样按窗口裁剪，不重复计入相邻两天）；
- * 2. 当日有仍未结束的会话（如「刚点开始计时」的作业）：会话起点落在当日窗口内且未结束，
- *    此时净耗时可能尚为 0，但它确实在当天动过，不应从盘点里消失；
- * 3. 当日完成：已完成会话的结束时刻落在当日（覆盖「不经过计时直接在清单里标记完成」的情形）。
- * 分母 = 满足上述条件的作业数，分子 = 其中状态为已完成的作业数；两者为 0 时完成率为 0。
- * 「当日」为**业务时区自然日**（时区由 Hilt 注入，默认系统时区），
- * 时间取值一律经可注入 [com.assignmate.app.core.domain.time.Clock]，便于测试注入固定时钟。
+ * **当天应做口径（完成率分母）**：某学生某一天的应做作业 = 「当天作业（归属日即当天）+ 阶段作业
+ * （今天落在其阶段覆盖范围内）」，由作业项推导（口径与 homework 清单页同源）；
+ * 完成数 = 其中当天状态为已完成的数量（阶段作业按每天详情、当天作业按状态列）；
+ * 分母为 0 时完成率为 0（不除零），页面展示儿童友好的空态。
+ * 暂停次数/暂停总时长/暂停最久作业均取自这些应做作业**当天的每天详情**（跨天计时按开始日归属，
+ * 与 timer 口径一致）；「当天」为**业务时区自然日**。
  *
  * 失败与权限收敛约定（不抛业务异常，成败统一为 [StatsResult]）：
  * - 无有效会话：[StatsFailure.NO_ACTIVE_SESSION]；
@@ -36,25 +34,29 @@ import com.assignmate.app.stats.domain.ItemDetail
 interface StatsRepository {
 
     /**
-     * 当日盘点：按学生维度聚合某一天的完成率、暂停次数、暂停总时长与暂停最久作业。
+     * 当日盘点：按学生维度聚合某一天的完成率、暂停次数、暂停总时长、暂停最久作业与阶段打卡进度。
      *
      * @param studentId 目标学生（家长会话需为该家长名下学生；学生会话仅可为本人）
-     * @param epochDay 目标自然日（UTC 纪元日）；调用方按业务时区取「今天」
+     * @param epochDay 目标自然日（业务时区纪元日）；调用方按业务时区取「今天」
      */
     suspend fun summarizeDay(studentId: Long, epochDay: Long): StatsResult<DaySummary>
 
     /**
-     * 单项作业详情：预估时长 / 实际时长（会话已用时长合计）/ 暂停时长 / 执行会话数 + 困难度侧面评估。
+     * 单项作业详情（**指定某一天**）：当天预估时长 / 当天实际时长 / 当天暂停时长 / 当天状态
+     * + 困难度侧面评估 + 阶段作业打卡进度。
      *
      * **数据维度**：以**作业归属学生**为准取数（作业的 `studentId` 决定查询维度）；
      * 仓库会校验「会话可见学生」与「作业归属学生」一致——学生会话查看不属于本人的作业、
      * 或家长会话在名下仅有一名学生时查看他人学生的作业，统一返回 [StatsFailure.ACCESS_DENIED]。
      *
-     * 时长口径为**累计**（全部历史执行会话，已扣除暂停），与当日盘点的「当日窗口」口径可能不同。
-     * 无执行记录时不返回错误：返回 [ItemDetail] 且 [ItemDetail.hasExecution] 为 false，
+     * 时长与暂停均为**当天口径**（阶段作业需按天分别查看，不再给整段合计）；
+     * 当天没有详情时不返回错误：返回 [ItemDetail] 且 [ItemDetail.hasExecution] 为 false，
      * 界面据此展示「尚未开始 / 暂无数据」。
+     *
+     * @param homeworkId 目标作业
+     * @param epochDay 要查看的自然日（业务时区纪元日；缺省语义由调用方按「今天」解析）
      */
-    suspend fun itemDetail(homeworkId: Long): StatsResult<ItemDetail>
+    suspend fun itemDetail(homeworkId: Long, epochDay: Long): StatsResult<ItemDetail>
 
     /**
      * 历史查询：按日期（或日期范围）返回逐日盘点，按日期倒序（最近的一天在前）。

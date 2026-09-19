@@ -11,8 +11,10 @@ import com.assignmate.app.auth.domain.SessionState
  * - DAY_SUMMARY：当日盘点页，`stats/day/{studentId}?epochDay={epochDay}`；完成率（进度 + 百分比）、
  *   暂停次数、暂停总时长、暂停最久作业；`epochDay` 为可选查询参数（缺省 [ARG_EPOCH_DAY_TODAY]
  *   表示「今天」），历史查询页「查看这一天的盘点」据此展示所选日期的盘点；入口可进入单项详情与历史查询；
- * - ITEM_DETAIL：单项详情页，`stats/item/{studentId}/{homeworkId}`；预估/实际/暂停时长 +
- *   困难度侧面评估提示（无执行记录时展示「尚未开始/暂无数据」）；
+ * - ITEM_DETAIL：单项详情页，`stats/item/{studentId}/{homeworkId}`；展示**指定某一天**（缺省「今天」，
+ *   由页面入参注入）的预估/实际/暂停时长与困难度侧面评估提示（无执行记录时展示「尚未开始/暂无数据」）；
+ *   阶段作业据此查看某一天的详情而非阶段总计——日期参数的接线（路由查询参数 + navArgument）属
+ *   framework 计划范围，本模块不改 NavHost；
  * - HISTORY：历史查询页，`stats/history/{studentId}?fromEpochDay={from}&toEpochDay={to}`；
  *   按日期或日期范围查看历史完成情况（学生/家长视角均可查看名下学生）。
  *
@@ -30,7 +32,14 @@ object StatsDestination {
      */
     const val DAY_SUMMARY = "stats/day/{studentId}?epochDay={epochDay}"
 
-    /** 单项详情页路由模板 */
+    /**
+     * 单项详情页路由模板。
+     *
+     * 日期口径（阶段作业按天查看）由 [ItemDetailRoute] 的 `epochDay` 入参承载，缺省「今天」；
+     * 若要让「历史日盘点里点开的详情」也落在该历史日，需 framework 在本路由上补一个可选查询参数
+     * （`epochDay`）并透传给页面——该接线属 framework 计划，本模块不改 NavHost
+     * （路由模板与 navArgument 一一对应的契约测试由 navigation 模块持有）。
+     */
     const val ITEM_DETAIL = "stats/item/{studentId}/{homeworkId}"
 
     /** 历史查询页路由模板（查询参数缺省为「今天」，由页面按会话时区解析） */
@@ -66,7 +75,13 @@ object StatsDestination {
         epochDay: Long = ARG_EPOCH_DAY_TODAY,
     ): String = "stats/day/$studentId?$ARG_EPOCH_DAY=$epochDay"
 
-    /** 拼装单项详情页实际路由 */
+    /**
+     * 拼装单项详情页实际路由。
+     *
+     * 说明：详情页的查看日期由 [ItemDetailRoute] 的 `epochDay` 入参承载（缺省「今天」），
+     * **不经路由参数**——把日期放进路由需要 framework 在本路由上补占位符与 navArgument，
+     * 属 framework 计划的接线范围（本模块不改 NavHost）。
+     */
     fun itemDetailRoute(studentId: Long, homeworkId: Long): String = "stats/item/$studentId/$homeworkId"
 
     /**

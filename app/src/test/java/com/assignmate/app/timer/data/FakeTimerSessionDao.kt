@@ -68,6 +68,14 @@ class FakeTimerSessionDao : TimerSessionDao {
     ): List<TimerSessionEntity> =
         rows.filter { it.studentId == studentId && it.status == status }.sortedBy { it.startedAt }
 
+    /** 按作业 + 业务自然日查询（排序口径与库内 SQL 一致：开始时刻升序） */
+    override suspend fun loadByHomeworkAndDay(
+        homeworkId: Long,
+        epochDay: Long,
+    ): List<TimerSessionEntity> =
+        rows.filter { it.homeworkId == homeworkId && it.epochDay == epochDay }
+            .sortedBy { it.startedAt }
+
     override suspend fun findById(id: Long): TimerSessionEntity? = rows.firstOrNull { it.id == id }
 
     override suspend fun updateFinish(sessionId: Long, finishedAtMillis: Long, status: String) {

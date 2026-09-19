@@ -11,15 +11,17 @@ import com.assignmate.app.auth.data.UpdateVerificationCodeResult
 import com.assignmate.app.auth.domain.Role
 import com.assignmate.app.auth.domain.SessionState
 import com.assignmate.app.auth.domain.Student
-import com.assignmate.app.homework.domain.HomeworkStatus
+import com.assignmate.app.core.domain.homework.HomeworkDayStatus
 import com.assignmate.app.stats.data.StatsFailure
 import com.assignmate.app.stats.data.StatsRepository
 import com.assignmate.app.stats.data.StatsResult
+import com.assignmate.app.stats.domain.DayItem
 import com.assignmate.app.stats.domain.DaySummary
 import com.assignmate.app.stats.domain.DifficultyLevel
 import com.assignmate.app.stats.domain.HistoryQuery
 import com.assignmate.app.stats.domain.ItemDetail
 import com.assignmate.app.stats.domain.PausedHomework
+import com.assignmate.app.stats.domain.StageProgress
 import java.time.Instant
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
@@ -46,12 +48,12 @@ internal class FakeStatsRepository : StatsRepository {
 
     /** 缺省结果（未入队时使用） */
     var dayResult: StatsResult<DaySummary> = StatsResult.Success(daySummary())
-    var detailResult: StatsResult<ItemDetail> = StatsResult.Success(itemDetail())
+    var detailResult: StatsResult<ItemDetail> = StatsResult.Success(itemDetailResult())
     var historyResult: StatsResult<List<DaySummary>> = StatsResult.Success(emptyList())
 
-    /** 调用记录：验证「幂等 start 不重复取数」与「重试再次取数」 */
+    /** 调用记录：验证「幂等 start 不重复取数」、「重试再次取数」与「日期透传」 */
     val dayCalls = mutableListOf<Pair<Long, Long>>()
-    val detailCalls = mutableListOf<Long>()
+    val detailCalls = mutableListOf<Pair<Long, Long>>()
     val historyCalls = mutableListOf<Pair<Long, HistoryQuery>>()
 
     override suspend fun summarizeDay(studentId: Long, epochDay: Long): StatsResult<DaySummary> {
@@ -59,8 +61,8 @@ internal class FakeStatsRepository : StatsRepository {
         return dayQueue.removeFirstOrNull() ?: dayResult
     }
 
-    override suspend fun itemDetail(homeworkId: Long): StatsResult<ItemDetail> {
-        detailCalls += homeworkId
+    override suspend fun itemDetail(homeworkId: Long, epochDay: Long): StatsResult<ItemDetail> {
+        detailCalls += homeworkId to epochDay
         return detailQueue.removeFirstOrNull() ?: detailResult
     }
 
@@ -159,7 +161,7 @@ internal class FakeStatsUiAuthRepository(
     }
 }
 
-/** 构造当日盘点结果（默认：1/2 完成、暂停 1 次 2 分钟、最久暂停为「语文生字」） */
+/** 构造当日盘点结果（默认：2 项应做、1 项完成、暂停 1 次 2 分钟、最久暂停为「语文生字」） */
 internal fun daySummary(
     epochDay: Long = DAY_EPOCH,
     totalCount: Int = 2,
@@ -172,39 +174,69 @@ internal fun daySummary(
         pausedMillis = 2 * MINUTE,
         pauseCount = 1,
     ),
+    items: List<DayItem> = emptyList(),
+    stages: List<StageProgress> = emptyList(),
 ): DaySummary = DaySummary(
     epochDay = epochDay,
     totalCount = totalCount,
     completedCount = completedCount,
+    items = items,
     pauseCount = pauseCount,
     pausedTotalMillis = pausedTotalMillis,
     mostPausedItem = mostPausedItem,
+    stages = stages,
 )
 
-/** 构造单项详情结果（[sessionCount] 为 0 即「尚未开始」） */
-internal fun itemDetail(
+/** 构造当天作业条目（当日清单投影用） */
+internal fun dayItem(
+    homeworkId: Long = 1L,
+    content: String = "语文生字",
+    status: HomeworkDayStatus = HomeworkDayStatus.COMPLETED,
+    isStage: Boolean = false,
+    priority: Int = 100,
+): DayItem = DayItem(
+    homeworkId = homeworkId,
+    content = content,
+    status = status,
+    isStage = isStage,
+    priority = priority,
+)
+
+/**
+ * 构造单项详情结果（[hasExecution] 为 false 即「这一天尚未开始」）。
+ *
+ * 命名刻意不与 [StatsRepository.itemDetail] 同名：同名时在实现该接口的替身（如闸门仓库）内部调用
+ * 会被成员函数遮蔽，导致自调用与类型不匹配。
+ */
+internal fun itemDetailResult(
     homeworkId: Long = 1L,
     content: String = "数学口算",
-    status: HomeworkStatus = HomeworkStatus.COMPLETED,
+    epochDay: Long = DAY_EPOCH,
+    isStage: Boolean = false,
+    dayStatus: HomeworkDayStatus = HomeworkDayStatus.COMPLETED,
     estimatedMinutes: Int? = 30,
     elapsedMillis: Long = 45 * MINUTE,
     pausedTotalMillis: Long = 10 * MINUTE,
     pauseCount: Int = 2,
-    sessionCount: Int = 1,
+    hasExecution: Boolean = true,
     difficulty: DifficultyLevel = DifficultyLevel.SLOW,
     assessmentHint: String = "比预估慢较多，中途暂停 2 次",
+    stageProgress: StageProgress? = null,
 ): ItemDetail = ItemDetail(
     homeworkId = homeworkId,
     content = content,
     studentId = FakeStatsUiAuthRepository.STUDENT_ID,
-    status = status,
+    epochDay = epochDay,
+    isStage = isStage,
+    dayStatus = dayStatus,
     estimatedMinutes = estimatedMinutes,
     elapsedMillis = elapsedMillis,
     pausedTotalMillis = pausedTotalMillis,
     pauseCount = pauseCount,
-    sessionCount = sessionCount,
+    hasExecution = hasExecution,
     difficulty = difficulty,
     assessmentHint = assessmentHint,
+    stageProgress = stageProgress,
 )
 
 /** 失败结果工厂 */

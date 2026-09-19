@@ -75,7 +75,16 @@ class AssignMateNavHostContractTest {
         val registered = registeredRoutes()
 
         assertTrue("未注册 DAY_SUMMARY：$registered", registered.contains(StatsDestination.DAY_SUMMARY))
-        assertTrue("未注册 ITEM_DETAIL：$registered", registered.contains(StatsDestination.ITEM_DETAIL))
+        // 单项详情路由由宿主在 stats 既有路径模板上补可选 epochDay 查询参数后注册
+        // （stats 侧常量只有路径部分，见 AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY）
+        assertTrue(
+            "未注册 ITEM_DETAIL（含可选 epochDay）：$registered",
+            registered.contains(AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY),
+        )
+        assertTrue(
+            "注册模板应以 stats 既有 ITEM_DETAIL 模板为前缀（不脱离 stats 契约）",
+            AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY.startsWith(StatsDestination.ITEM_DETAIL),
+        )
         assertTrue("未注册 HISTORY：$registered", registered.contains(StatsDestination.HISTORY))
     }
 
@@ -474,7 +483,11 @@ class AssignMateNavHostContractTest {
         assertNotNull("未找到当日盘点路由注册块", dayBlock)
         assertTrue(
             "盘点页 onOpenItemDetail 应接到单项详情页",
-            dayBlock!!.contains("navController.toStatsItemDetail(studentId, homeworkId)"),
+            dayBlock!!.contains("navController.toStatsItemDetail("),
+        )
+        assertTrue(
+            "盘点页应把自身正在展示的 epochDay 一并透传给详情页（历史日盘点点开的详情落该历史日）",
+            dayBlock.contains("epochDay = entry.statsEpochDayArg(StatsDestination.ARG_EPOCH_DAY)"),
         )
         assertTrue(
             "盘点页 onOpenHistory 应接到历史查询页",
@@ -483,8 +496,8 @@ class AssignMateNavHostContractTest {
 
         val itemDetail = blockForHelper("toStatsItemDetail")!!
         assertTrue(
-            "toStatsItemDetail 应进入 StatsDestination.itemDetailRoute（携带学生与作业）",
-            itemDetail.contains("navigate(StatsDestination.itemDetailRoute(studentId, homeworkId))"),
+            "toStatsItemDetail 应进入宿主拼装的详情路由（stats 既有路径 + 可选 epochDay 查询串）",
+            itemDetail.contains("navigate(AppDestination.statsItemDetailRoute(studentId, homeworkId, epochDay))"),
         )
         val history = blockForHelper("toStatsHistory")!!
         assertTrue(
@@ -529,11 +542,16 @@ class AssignMateNavHostContractTest {
         assertTrue(
             "当日盘点/单项详情的学生 id 应经 statsStudentIdArg() 解析",
             blockForRoute(StatsDestination.DAY_SUMMARY)!!.contains("statsStudentIdArg()") &&
-                blockForRoute(StatsDestination.ITEM_DETAIL)!!.contains("statsStudentIdArg()"),
+                blockForRoute(AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY)!!.contains("statsStudentIdArg()"),
         )
         assertTrue(
             "单项详情应经 statsHomeworkIdArg() 解析 homeworkId",
-            blockForRoute(StatsDestination.ITEM_DETAIL)!!.contains("statsHomeworkIdArg()"),
+            blockForRoute(AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY)!!.contains("statsHomeworkIdArg()"),
+        )
+        assertTrue(
+            "单项详情应经 statsEpochDayArg() 解析可选日期（与统计既有日期口径同源）",
+            blockForRoute(AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY)!!
+                .contains("epochDay = entry.statsEpochDayArg(StatsDestination.ARG_EPOCH_DAY)"),
         )
         assertTrue(
             "历史查询应经 statsEpochDayArg() 解析起止日期",
@@ -742,6 +760,7 @@ class AssignMateNavHostContractTest {
         "TimerDestination.COMPLETION" -> TimerDestination.COMPLETION
         "StatsDestination.DAY_SUMMARY" -> StatsDestination.DAY_SUMMARY
         "StatsDestination.ITEM_DETAIL" -> StatsDestination.ITEM_DETAIL
+        "AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY" -> AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY
         "StatsDestination.HISTORY" -> StatsDestination.HISTORY
         "SettingsDestination.HOME" -> SettingsDestination.HOME
         "SettingsDestination.OCR_CONFIG" -> SettingsDestination.OCR_CONFIG

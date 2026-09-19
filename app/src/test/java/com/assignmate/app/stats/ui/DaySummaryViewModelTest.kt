@@ -3,10 +3,12 @@ package com.assignmate.app.stats.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.assignmate.app.auth.domain.SessionState
+import com.assignmate.app.core.domain.homework.HomeworkDayStatus
 import com.assignmate.app.core.domain.time.Clock
 import com.assignmate.app.stats.data.StatsFailure
 import com.assignmate.app.stats.data.StatsResult
 import com.assignmate.app.stats.domain.StatsCalculations
+import com.assignmate.app.stats.domain.StageProgress
 import java.time.ZoneId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -20,6 +22,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -295,7 +298,7 @@ class DaySummaryViewModelTest {
         assertTrue(todayState.isToday)
         assertEquals("正在盘点今天的作业…", todayState.loadingText)
         assertEquals("今天的作业盘点", todayState.titleText)
-        assertEquals("今天动过的作业（2 项）", todayState.itemListTitle)
+        assertEquals("今天要做的作业（2 项）", todayState.itemListTitle)
         assertEquals(StatsErrorMessages.NO_DATA_TODAY, todayState.emptyText)
 
         val historyStats = FakeStatsRepository().apply {
@@ -309,7 +312,7 @@ class DaySummaryViewModelTest {
         assertEquals("2023-11-13", historyState.dateText)
         assertEquals("正在盘点 2023-11-13 的作业…", historyState.loadingText)
         assertEquals("2023-11-13 的作业盘点", historyState.titleText)
-        assertEquals("这一天动过的作业（2 项）", historyState.itemListTitle)
+        assertEquals("这一天要做的作业（2 项）", historyState.itemListTitle)
         assertEquals(StatsErrorMessages.NO_DATA, historyState.emptyText)
     }
 
@@ -358,6 +361,152 @@ class DaySummaryViewModelTest {
         assertEquals(DaySummaryPhase.NO_SESSION, state.phase)
         assertEquals(DAY_EPOCH - 3, state.epochDay)
         assertTrue(stats.dayCalls.isEmpty())
+    }
+
+    // ---- 当天应做清单行（作业每天详情口径的展示投影） ----
+
+    @Test
+    fun `清单行按当天状态与阶段打卡进度投影`() = runTest {
+        val stats = FakeStatsRepository().apply {
+            dayResult = StatsResult.Success(
+                daySummary(
+                    totalCount = 2,
+                    completedCount = 1,
+                    items = listOf(
+                        dayItem(homeworkId = 1L, content = "语文生字", status = HomeworkDayStatus.COMPLETED),
+                        dayItem(
+                            homeworkId = 2L,
+                            content = "背单词",
+                            status = HomeworkDayStatus.IN_PROGRESS,
+                            isStage = true,
+                            priority = 101,
+                        ),
+                    ),
+                    stages = listOf(
+                        StageProgress(homeworkId = 2L, content = "背单词", doneDays = 3, totalDays = 7),
+                    ),
+                ),
+            )
+        }
+        val viewModel = track(daySummaryViewModel(stats, FakeStatsUiAuthRepository()))
+
+        viewModel.start(StatsDestination.ARG_STUDENT_ID_NONE)
+
+        val rows = viewModel.uiState.value.itemRows
+        assertEquals(listOf(1L, 2L), rows.map { it.homeworkId })
+        assertEquals("语文生字", rows.first().content)
+        assertEquals("已完成", rows.first().statusText)
+        // 当天作业没有阶段打卡进度
+        assertNull(rows.first().stageProgressText)
+        assertEquals("进行中", rows.last().statusText)
+        assertEquals("阶段打卡 3/7 天", rows.last().stageProgressText)
+    }
+
+    @Test
+    fun `无盘点结果或清单为空时清单行为空而不抛异常`() = runTest {
+        val viewModel = track(daySummaryViewModel(FakeStatsRepository(), FakeStatsUiAuthRepository()))
+
+        viewModel.start(StatsDestination.ARG_STUDENT_ID_NONE)
+
+        // 缺省结果没有清单条目：投影为空列表而非崩溃
+        assertTrue(viewModel.uiState.value.itemRows.isEmpty())
+        assertTrue(DaySummaryUiState().itemRows.isEmpty())
+    }
+
+    // ---- 事件丢弃路径的不可达性证据（同型隐患核实的用例证据） ----
+
+    /**
+     * 当日盘点页事件接线的「丢弃分支不可达」证据（对应一轮风后计划第二项的同型隐患核实）。
+     *
+     * 背景：`DaySummaryRoute` 消费 `OpenItemDetail` 时用 `uiState.studentId?.let { … }`——学生未解析时
+     * 既不导航也无任何提示，形态上是一处**静默丢弃**（历史页同类分支已改接可感知兜底）。本用例逐阶段
+     * 证明它**不可达**：清单行（也就是那个唯一的可点击按钮）只在 `summary != null` 时渲染，而
+     * `studentId` 与 `summary` 由**同一次** `_uiState.update` 写入、此后不会被重置为 null，
+     * 故「按钮可点」恒蕴含「学生已解析」；反过来学生未解析的两个阶段（NO_SESSION / NO_STUDENT）
+     * 清单行必为空、页面根本不渲染按钮。因此本页不需要像历史页那样补丢弃兜底。
+     */
+    @Test
+    fun `清单可点击时学生必已解析（事件丢弃分支不可达）`() = runTest {
+        // ① 就绪（有清单）：按钮可点 -> 学生必已解析
+        val ready = track(
+            daySummaryViewModel(
+                FakeStatsRepository().apply {
+                    dayResult = StatsResult.Success(
+                        daySummary(
+                            totalCount = 2,
+                            completedCount = 1,
+                            items = listOf(
+                                dayItem(homeworkId = 1L, content = "语文生字", status = HomeworkDayStatus.COMPLETED),
+                            ),
+                        ),
+                    )
+                },
+                FakeStatsUiAuthRepository(),
+            ),
+        )
+        ready.start(StatsDestination.ARG_STUDENT_ID_NONE)
+        val readyState = ready.uiState.value
+        assertEquals(DaySummaryPhase.READY, readyState.phase)
+        assertTrue("本阶段必须有可点击的清单行，否则本用例失去意义", readyState.itemRows.isNotEmpty())
+        assertNotNull("按钮可点时学生必须已解析（OpenItemDetail 丢弃分支因此不可达）", readyState.studentId)
+
+        // ② 就绪（空清单）：即便点了也不存在按钮；学生同样已解析
+        val readyEmpty = track(
+            daySummaryViewModel(
+                FakeStatsRepository().apply {
+                    dayResult = StatsResult.Success(daySummary(totalCount = 0, completedCount = 0))
+                },
+                FakeStatsUiAuthRepository(),
+            ),
+        )
+        readyEmpty.start(StatsDestination.ARG_STUDENT_ID_NONE)
+        assertNotNull("就绪态（含空清单）学生必已解析", readyEmpty.uiState.value.studentId)
+        assertTrue(readyEmpty.uiState.value.itemRows.isEmpty())
+
+        // ③ 取数失败：学生同样在失败分支写入（页面此时是错误态，无按钮）
+        val failed = track(
+            daySummaryViewModel(
+                FakeStatsRepository().apply { dayResult = statsFailure(StatsFailure.ACCESS_DENIED) },
+                FakeStatsUiAuthRepository(),
+            ),
+        )
+        failed.start(StatsDestination.ARG_STUDENT_ID_NONE)
+        assertEquals(DaySummaryPhase.ERROR, failed.uiState.value.phase)
+        assertNotNull("失败态学生 id 同样已解析（失败提示与重试仍按该学生）", failed.uiState.value.studentId)
+        assertTrue(failed.uiState.value.itemRows.isEmpty())
+
+        // ④⑤ 无会话 / 家长未选学生：学生未解析，但清单行必为空 —— 没有任何可点击入口
+        val noSession = track(
+            daySummaryViewModel(FakeStatsRepository(), FakeStatsUiAuthRepository(SessionState.NONE)),
+        )
+        noSession.start(StatsDestination.ARG_STUDENT_ID_NONE)
+        assertEquals(DaySummaryPhase.NO_SESSION, noSession.uiState.value.phase)
+        assertNull(noSession.uiState.value.studentId)
+        assertTrue(noSession.uiState.value.itemRows.isEmpty())
+
+        val noStudent = track(
+            daySummaryViewModel(
+                FakeStatsRepository(),
+                FakeStatsUiAuthRepository(FakeStatsUiAuthRepository.PARENT_SESSION),
+            ),
+        )
+        noStudent.start(StatsDestination.ARG_STUDENT_ID_NONE)
+        assertEquals(DaySummaryPhase.NO_STUDENT, noStudent.uiState.value.phase)
+        assertNull(noStudent.uiState.value.studentId)
+        assertTrue(noStudent.uiState.value.itemRows.isEmpty())
+
+        // 全阶段不变量：清单行非空 => 学生已解析（等价于「丢弃分支不可达」）
+        listOf(
+            readyState,
+            readyEmpty.uiState.value,
+            failed.uiState.value,
+            noSession.uiState.value,
+            noStudent.uiState.value,
+        ).forEach { state ->
+                if (state.itemRows.isNotEmpty()) {
+                    assertNotNull("阶段 ${state.phase} 出现可点击清单行却未解析学生：丢弃分支会被触达", state.studentId)
+                }
+            }
     }
 
     // ---- 测试辅助 ----

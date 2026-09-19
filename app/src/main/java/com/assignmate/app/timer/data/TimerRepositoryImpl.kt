@@ -7,6 +7,8 @@ import com.assignmate.app.core.data.db.dao.PauseRecordDao
 import com.assignmate.app.core.data.db.dao.TimerSessionDao
 import com.assignmate.app.core.data.db.entity.PauseRecordEntity
 import com.assignmate.app.core.data.db.entity.TimerSessionEntity
+import com.assignmate.app.core.domain.homework.HomeworkDailyRecordRepository
+import com.assignmate.app.core.domain.homework.HomeworkDayStatus
 import com.assignmate.app.core.domain.time.Clock
 import com.assignmate.app.homework.data.HomeworkRepository
 import com.assignmate.app.homework.data.HomeworkStatusResult
@@ -14,6 +16,7 @@ import com.assignmate.app.homework.domain.HomeworkItem
 import com.assignmate.app.homework.domain.HomeworkValidators
 import com.assignmate.app.timer.domain.PauseRecord
 import com.assignmate.app.timer.domain.TimerCalculations
+import com.assignmate.app.timer.domain.TimerConstants
 import com.assignmate.app.timer.domain.TimerPhase
 import com.assignmate.app.timer.domain.TimerSession
 import com.assignmate.app.timer.domain.TimerSessionDetail
@@ -45,7 +48,18 @@ import javax.inject.Singleton
  *   恢复时清理重复暂停 + 收尾 + 更新汇总）统一经 [TimerTransactionRunner] 收敛为一次原子提交，
  *   避免中断留下「会话仍 RUNNING + 未结束暂停明细」这类不一致数据（会导致累计暂停虚高、次数虚增）；
  * - 落库状态统一走 [TimerPhase.persistedName]：页面级阶段（IDLE/RESTING）若被写入会当场抛出，
- *   把「库内 status 取值域」从人工约定变成可执行约束。
+ *   把「库内 status 取值域」从人工约定变成可执行约束；
+ * - **逐日归属（阶段作业改为「1 条 + 每天详情」后的口径）**：
+ *   1) 归属日以**会话开始时刻**所在的业务自然日为准（`epochDay` 同时落到 timer_session 与 pause_record），
+ *      跨过午夜的计时/暂停仍计入**开始那一天**，同一会话绝不会写两条不同天的详情；
+ *   2) 四个动作（开始/暂停/恢复/完成）都把当日执行数据回写 core 的「作业每天详情」
+ *      （开始时刻、预估/实际时长、暂停次数/暂停总时长、完成时刻；完成时状态置已完成），
+ *      写入经 [HomeworkDailyRecordRepository] 领域接口，不直接碰 core 的 Room DAO；
+ *   3) 当天详情的暂停与时长按**归属日**聚合（当日全部会话与暂停），因此同一天多次开始会累加而非互相覆盖；
+ *   4) 跨天完成时，作业状态流转会按「此刻」写下第二天的完成记录，本模块随后把这条**不属于本会话**的记录
+ *      回退为「未开始」（见 [rollbackForeignDayCompletion]），保证跨天会话只留下一条计入执行数据的归属日详情；
+ *   5) 「到点不锁定、跨日才判未完成」由 homework 的 StageDayRecords 统一投影，本模块不做第二套缺卡判定：
+ *      每日截止时刻到点只提醒（见 TimerReminderRules），当天仍可开始/完成并正常计入当天详情。
  */
 @Singleton
 class TimerRepositoryImpl @Inject constructor(
@@ -55,6 +69,7 @@ class TimerRepositoryImpl @Inject constructor(
     private val authRepository: AuthRepository,
     private val clock: Clock,
     private val transactionRunner: TimerTransactionRunner,
+    private val dailyRecordRepository: HomeworkDailyRecordRepository,
 ) : TimerRepository {
 
     // ---- 计时执行 ----
@@ -82,18 +97,27 @@ class TimerRepositoryImpl @Inject constructor(
         if (synced !is HomeworkStatusResult.Success) {
             return TimerStartResult.HomeworkSyncFailed(synced)
         }
+        val startedAtMillis = clock.currentTimeMillis()
+        // 归属日 = 会话开始时刻所在业务自然日（后续暂停/恢复/完成一律沿用该日，跨天不分裂）
+        val epochDay = dailyRecordRepository.epochDayOf(startedAtMillis)
         val entity = TimerSessionEntity(
             homeworkId = homeworkId,
             studentId = homework.studentId,
             parentAccountId = homework.parentAccountId,
-            startedAt = Instant.ofEpochMilli(clock.currentTimeMillis()),
+            epochDay = epochDay,
+            startedAt = Instant.ofEpochMilli(startedAtMillis),
             finishedAt = null,
             pausedTotalMillis = 0L,
             pauseCount = 0,
             status = TimerPhase.RUNNING.persistedName,
         )
-        val id = timerSessionDao.insert(entity)
-        return TimerStartResult.Success(entity.copy(id = id).toDomain())
+        // 事务化：会话落库 + 当天详情回写要么一起成功，避免「有会话但当天详情空白」
+        return transactionRunner.inTransaction {
+            val id = timerSessionDao.insert(entity)
+            val created = entity.copy(id = id)
+            syncDayRecord(created, HomeworkDayStatus.IN_PROGRESS, homework.estimatedMinutes, startedAtMillis)
+            TimerStartResult.Success(created.toDomain())
+        }
     }
 
     override suspend fun pauseSession(sessionId: Long): TimerPauseResult {
@@ -108,19 +132,26 @@ class TimerRepositoryImpl @Inject constructor(
             return TimerPauseResult.IllegalPhase(phase)
         }
         val now = clock.currentTimeMillis()
-        // 事务化：明细与状态要么一起成功、要么都不写（中断不会留下「RUNNING + 未结束明细」）
+        // 暂停明细的归属日取**会话归属日**而非暂停时刻所在日：跨过午夜的暂停仍归属到开始那一天
+        val epochDay = entity.attributedEpochDay()
+        // 事务化：明细 + 状态 + 当天详情（暂停次数/暂停总时长）要么一起成功、要么都不写
+        // （中断不会留下「RUNNING + 未结束明细」，也不会留下与明细不一致的当天汇总）
         transactionRunner.inTransaction {
             pauseRecordDao.insert(
                 PauseRecordEntity(
                     sessionId = sessionId,
                     homeworkId = entity.homeworkId,
+                    epochDay = epochDay,
                     pauseStartAt = Instant.ofEpochMilli(now),
                     pauseEndAt = null,
                 ),
             )
             timerSessionDao.updateStatus(sessionId, TimerPhase.PAUSED.persistedName)
+            syncDayRecord(entity, HomeworkDayStatus.IN_PROGRESS, estimatedMinutes = null, nowMillis = now)
         }
-        return TimerPauseResult.Success(entity.copy(status = TimerPhase.PAUSED.persistedName).toDomain())
+        return TimerPauseResult.Success(
+            entity.copy(status = TimerPhase.PAUSED.persistedName, epochDay = epochDay).toDomain(),
+        )
     }
 
     override suspend fun resumeSession(sessionId: Long): TimerResumeResult {
@@ -134,7 +165,8 @@ class TimerRepositoryImpl @Inject constructor(
             return TimerResumeResult.IllegalPhase(phase)
         }
         val now = clock.currentTimeMillis()
-        // 事务化：先清理历史中断可能留下的重复未结束暂停，再收尾当前暂停并刷新汇总（一次原子提交）
+        val epochDay = entity.attributedEpochDay()
+        // 事务化：先清理历史中断可能留下的重复未结束暂停，再收尾当前暂停并刷新汇总、回写当天详情（一次原子提交）
         return transactionRunner.inTransaction {
             cleanupUnfinishedPauses(sessionId)
             val ongoing = pauseRecordDao.findUnfinishedBySession(sessionId)
@@ -148,11 +180,13 @@ class TimerRepositoryImpl @Inject constructor(
                 pauseCount = pauses.size,
                 status = TimerPhase.RUNNING.persistedName,
             )
+            syncDayRecord(entity, HomeworkDayStatus.IN_PROGRESS, estimatedMinutes = null, nowMillis = now)
             TimerResumeResult.Success(
                 entity.copy(
                     pausedTotalMillis = pausedTotal,
                     pauseCount = pauses.size,
                     status = TimerPhase.RUNNING.persistedName,
+                    epochDay = epochDay,
                 ).toDomain(),
             )
         }
@@ -174,7 +208,8 @@ class TimerRepositoryImpl @Inject constructor(
             return TimerCompleteResult.HomeworkSyncFailed(synced)
         }
         val now = clock.currentTimeMillis()
-        // 事务化收尾：收尾未结束暂停 + 写结束时刻 + 刷新暂停汇总，一次原子提交
+        val epochDay = entity.attributedEpochDay()
+        // 事务化收尾：收尾未结束暂停 + 写结束时刻 + 刷新暂停汇总 + 当天详情置已完成并回写实际时长，一次原子提交
         return transactionRunner.inTransaction {
             // 先清理历史中断留下的重复未结束明细，再收尾唯一一条未结束暂停，避免统计口径被污染
             cleanupUnfinishedPauses(sessionId)
@@ -189,16 +224,146 @@ class TimerRepositoryImpl @Inject constructor(
                 pauseCount = pauseCount,
                 status = TimerPhase.FINISHED.persistedName,
             )
+            // 当天详情必须以「已完成 + 实际时长 + 完成时刻」收口（归属日仍是会话开始那一天）
+            syncDayRecord(
+                session = entity,
+                status = HomeworkDayStatus.COMPLETED,
+                estimatedMinutes = synced.item.estimatedMinutes,
+                nowMillis = now,
+            )
+            // 跨天补偿：作业状态流转会按「此刻」写当天详情，跨天会话不应把第二天也记成完成
+            rollbackForeignDayCompletion(entity, now)
             TimerCompleteResult.Success(
                 session = entity.copy(
                     finishedAt = Instant.ofEpochMilli(now),
                     pausedTotalMillis = pausedTotal,
                     pauseCount = pauseCount,
                     status = TimerPhase.FINISHED.persistedName,
+                    epochDay = epochDay,
                 ).toDomain(),
                 homework = synced.item,
             )
         }
+    }
+
+    // ---- 逐日归属：「作业每天详情」回写（口径见类注释） ----
+
+    /**
+     * 会话归属的业务自然日：优先取库内已落库的 `epoch_day`；为未指定哨兵
+     * （[TimerConstants.UNSPECIFIED_EPOCH_DAY]，仅 v4 旧库迁移行会出现）时按**会话开始时刻**业务时区重新折算，
+     * 从而让历史行也能正确落到归属日，而不是写出一条 epoch_day = 0 的垃圾详情。
+     */
+    private fun TimerSessionEntity.attributedEpochDay(): Long =
+        epochDay.takeIf { it != TimerConstants.UNSPECIFIED_EPOCH_DAY }
+            ?: dailyRecordRepository.epochDayOf(startedAt.toEpochMilli())
+
+    /**
+     * 把会话的当日执行数据回写「作业每天详情」（core 领域接口，不经 Room DAO）。
+     *
+     * 关键口径：
+     * - 归属日取 [attributedEpochDay]（会话开始日），故跨天会话不会写第二天；
+     * - 当日数据按**归属日内该作业的全部会话与暂停**聚合，因此同一天多次开始会累加而不是互相覆盖
+     *   （第二天的新会话归属到第二天，自然与第一天互不影响）；
+     * - [estimatedMinutes] 传 null 表示「沿用当天详情既有预估」（暂停/恢复不改预估）；
+     * - 实际时长仅在当天有会话收尾后才写（否则保持 null，避免把进行中的时间记成实际时长）。
+     */
+    private suspend fun syncDayRecord(
+        session: TimerSessionEntity,
+        status: HomeworkDayStatus,
+        estimatedMinutes: Int?,
+        nowMillis: Long,
+    ) {
+        val epochDay = session.attributedEpochDay()
+        val existing = dailyRecordRepository.find(session.homeworkId, epochDay)
+        val daySessions = timerSessionDao.loadByHomeworkAndDay(session.homeworkId, epochDay)
+            .ifEmpty { listOfNotNull(timerSessionDao.findById(session.id)) }
+        val daySessionIds = daySessions.map { it.id }.toSet()
+        val dayPauses = pauseRecordDao.loadByHomeworkAndDay(session.homeworkId, epochDay)
+            .filter { it.sessionId in daySessionIds }
+            .map { it.toDomain() }
+        val recordId = dailyRecordRepository.upsertStatus(
+            homeworkId = session.homeworkId,
+            studentId = session.studentId,
+            epochDay = epochDay,
+            status = status,
+            nowMillis = nowMillis,
+        )
+        dailyRecordRepository.updateExecution(
+            id = recordId,
+            startedAtMillis = dayStartedAtMillisOf(daySessions, session),
+            estimatedMinutes = estimatedMinutes ?: existing?.estimatedMinutes,
+            actualMinutes = dayActualMinutesOf(daySessions),
+            pauseCount = TimerCalculations.pauseCount(dayPauses),
+            pausedTotalMinutes = TimerCalculations.minutesOf(
+                TimerCalculations.pauseAccumulatedMillis(dayPauses, nowMillis),
+            ),
+            finishedAtMillis = daySessions.mapNotNull { it.finishedAt?.toEpochMilli() }.maxOrNull(),
+        )
+    }
+
+    /**
+     * 当天详情的「开始时刻」：取当天全部会话中**最早**的开始时刻（同一天多次开始不会把起点推后）。
+     *
+     * 空列表安全兜底（修复轮 #8）：原实现用 `minOf`，在「当天查不到会话且自身会话也查不到」
+     * （DAO 异常/数据被并发清理）这一极端空列表下会抛 `NoSuchElementException`，把一次详情回写变成崩溃。
+     * 改为 `minOfOrNull` 并以**当前会话的开始时刻**兜底：既不抛异常，写下的也是这次执行的真实起点。
+     */
+    private fun dayStartedAtMillisOf(
+        daySessions: List<TimerSessionEntity>,
+        session: TimerSessionEntity,
+    ): Long = daySessions.minOfOrNull { it.startedAt.toEpochMilli() }
+        ?: session.startedAt.toEpochMilli()
+
+    /**
+     * 当天实际时长（分钟）：对当天**已收尾**的会话求和「结束时刻 − 开始时刻 − 暂停累计」后向上取整；
+     * 当天尚无会话收尾时返回 null（不写实际时长）。
+     */
+    private fun dayActualMinutesOf(daySessions: List<TimerSessionEntity>): Int? {
+        val finished = daySessions.filter { it.finishedAt != null }
+        if (finished.isEmpty()) {
+            return null
+        }
+        val elapsedMillis = finished.sumOf { session ->
+            (session.finishedAt!!.toEpochMilli() - session.startedAt.toEpochMilli() - session.pausedTotalMillis)
+                .coerceAtLeast(0L)
+        }
+        return TimerCalculations.minutesOf(elapsedMillis)
+    }
+
+    /**
+     * 跨天补偿：把「完成时刻所在日」上由**作业状态流转**写下的完成记录回退为「未开始」。
+     *
+     * 背景：`homework.complete` 会把「此刻」所在自然日的每天详情置为已完成，而本模块的归属口径是
+     * **会话开始日**——跨过午夜完成时（例：23:50 开始、次日 00:10 完成）就会多出一条「第二天已完成」，
+     * 使这一天的作业被误判成已完成（孩子第二天其实还没做）。故此时把第二天那条记录回退为「未开始」，
+     * 让跨天会话只留下**一条计入执行数据的归属日详情**，第二天保持「未开始/仍可完成」。
+     *
+     * 安全边界（避免误伤真实数据）：仅当「完成时刻所在日 ≠ 会话归属日」、该日记录当前为「已完成」、
+     * 且该日在 timer_session 里**没有任何会话**（说明它并非孩子真实做过的一天）时才回退；
+     * 回退同时清空执行数据（完成时刻等），状态回到「未开始」。
+     */
+    private suspend fun rollbackForeignDayCompletion(session: TimerSessionEntity, nowMillis: Long) {
+        val completionDay = dailyRecordRepository.epochDayOf(nowMillis)
+        if (completionDay == session.attributedEpochDay()) {
+            return
+        }
+        val record = dailyRecordRepository.find(session.homeworkId, completionDay) ?: return
+        if (record.status != HomeworkDayStatus.COMPLETED) {
+            return
+        }
+        if (timerSessionDao.loadByHomeworkAndDay(session.homeworkId, completionDay).isNotEmpty()) {
+            return
+        }
+        dailyRecordRepository.updateStatus(record.id, HomeworkDayStatus.NOT_STARTED)
+        dailyRecordRepository.updateExecution(
+            id = record.id,
+            startedAtMillis = null,
+            estimatedMinutes = null,
+            actualMinutes = null,
+            pauseCount = 0,
+            pausedTotalMinutes = 0,
+            finishedAtMillis = null,
+        )
     }
 
     // ---- 权限围栏（写入口统一口径） ----
@@ -318,6 +483,7 @@ class TimerRepositoryImpl @Inject constructor(
         pausedTotalMillis = pausedTotalMillis,
         pauseCount = pauseCount,
         phase = TimerPhase.fromSessionStatus(status),
+        epochDay = epochDay,
     )
 
     private fun PauseRecordEntity.toDomain(): PauseRecord = PauseRecord(
@@ -326,5 +492,6 @@ class TimerRepositoryImpl @Inject constructor(
         homeworkId = homeworkId,
         pauseStartAt = pauseStartAt,
         pauseEndAt = pauseEndAt,
+        epochDay = epochDay,
     )
 }

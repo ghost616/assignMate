@@ -24,7 +24,10 @@ import kotlinx.coroutines.launch
 /**
  * 当日盘点页 ViewModel：完成率（进度 + 百分比）、暂停次数、暂停总时长、暂停最久作业。
  *
- * 数据来源：[StatsRepository.summarizeDay]（按学生维度聚合 homework 清单与 timer 会话/暂停明细）。
+ * 数据来源：[StatsRepository.summarizeDay]（按学生维度聚合 homework 清单与**作业每天详情**）。
+ * 完成率分母为**当天应做**的作业数（由作业项推导：当天作业的归属日即当天 + 今天落在阶段覆盖范围内的
+ * 阶段作业，见 [com.assignmate.app.stats.domain.StatsCalculations.shouldDoOn]；**不是**「当天有没有每天详情」），
+ * 分子为其中当天已完成的数量；暂停三项同样取自当天应做作业的当天详情。
  *
  * 状态流转（单数据流 [uiState] + 一次性事件 [events]）：
  * 1. 初始 [DaySummaryPhase.LOADING]；
@@ -39,7 +42,7 @@ import kotlinx.coroutines.launch
  * 盘点日期口径：路由参数 `epochDay` 指定要盘点的自然日（历史查询页「查看这一天的盘点」据此进入），
  * 缺省/非法（[StatsDestination.ARG_EPOCH_DAY_TODAY]）回落「今天」；
  * 「今天」由可注入 [Clock] 与业务时区 [ZoneId] 经 [StatsCalculations.epochDayOfToday] 解析，
- * 与仓库的当日窗口换算（[StatsCalculations.dayStartMillisOf]）同源，避免跨零点/时区口径漂移。
+ * 与仓库的「今天」口径（[StatsCalculations.epochDayOfToday]）同源，避免跨零点/时区口径漂移。
  */
 @HiltViewModel
 class DaySummaryViewModel @Inject constructor(
@@ -215,7 +218,7 @@ data class DaySummaryUiState(
     val itemListTitle: String
         get() {
             val scope = if (isToday) "今天" else "这一天"
-            return "${scope}动过的作业（${summary?.totalCount ?: 0} 项）"
+            return "${scope}要做的作业（${summary?.totalCount ?: 0} 项）"
         }
 
     /** 空态文案：按盘点日期选择「今天 / 这一天」口径 */
@@ -250,7 +253,38 @@ data class DaySummaryUiState(
         get() = summary?.mostPausedItem?.let { paused ->
             "「${paused.content}」暂停最久：${StatsCalculations.durationText(paused.pausedMillis)}（${paused.pauseCount} 次）"
         }
+
+    /**
+     * 当天应做作业的清单行（作业内容 + **当天**状态 + 阶段打卡进度）。
+     *
+     * 状态取自作业每天详情（阶段作业同一条作业项在不同天状态不同），
+     * 故页面不直接读作业项状态，统一经本投影渲染，避免「按作业项聚合状态展示」的旧口径回流。
+     */
+    val itemRows: List<DayItemRow>
+        get() {
+            val current = summary ?: return emptyList()
+            val progressById = current.stages.associateBy { it.homeworkId }
+            return current.items.map { item ->
+                DayItemRow(
+                    homeworkId = item.homeworkId,
+                    content = item.content,
+                    statusText = StatsErrorMessages.dayStatusLabel(item.status),
+                    stageProgressText = progressById[item.homeworkId]
+                        ?.let { StatsErrorMessages.stageProgressText(it) },
+                )
+            }
+        }
 }
+
+/** 当日清单行（页面直接渲染的展示投影） */
+data class DayItemRow(
+    val homeworkId: Long,
+    val content: String,
+    /** 当天状态文案（如「已完成」/「还没开始」） */
+    val statusText: String,
+    /** 阶段打卡进度文案（非阶段作业为 null） */
+    val stageProgressText: String?,
+)
 
 /** 当日盘点页一次性事件（Channel 投递，避免重组误触发导航） */
 sealed interface DaySummaryEvent {

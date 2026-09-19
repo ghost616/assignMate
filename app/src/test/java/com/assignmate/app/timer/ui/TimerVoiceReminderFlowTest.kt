@@ -328,6 +328,7 @@ class TimerVoiceReminderFlowTest {
         overduePromptStore = env.overduePromptStore,
         permissionChecker = env.permissionChecker,
         clock = env.clock,
+        zoneId = TimerTestEnv.ZONE,
     )
 
     private fun restViewModel(env: TimerTestEnv): TimerRestViewModel = TimerRestViewModel(

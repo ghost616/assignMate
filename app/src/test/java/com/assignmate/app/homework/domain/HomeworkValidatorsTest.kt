@@ -3,6 +3,7 @@ package com.assignmate.app.homework.domain
 import com.assignmate.app.auth.domain.Role
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZoneOffset
 import org.junit.Assert.assertEquals
@@ -376,7 +377,7 @@ class HomeworkValidatorsTest {
     }
 
     @Test
-    fun `家长录入阶段作业未设截止时间被拦截`() {
+    fun `家长录入阶段作业未设每日截止时刻被拦截`() {
         val template = HomeworkTemplate(
             content = "每天读课文",
             type = HomeworkType.STAGE,
@@ -391,37 +392,82 @@ class HomeworkValidatorsTest {
             HomeworkValidationError.MISSING_STAGE_DEADLINE,
             (error as HomeworkValidationException).error,
         )
+        // 只填时刻（每日到点截止）即通过——不再要求「阶段覆盖末日 ≤ deadline 所在日」
+        val withTime = template.copy(
+            deadline = HomeworkDailyDeadlineCodec.timeOfDayCarrier(LocalTime.of(21, 0)),
+        )
+        assertTrue(HomeworkValidators.validateTemplate(withTime).isSuccess)
+
+        val items = withTime.toItems(
+            parentAccountId = 1L,
+            studentId = 10L,
+            createdAt = Instant.ofEpochMilli(baseMillis),
+            firstPriority = 0,
+        )
+        assertEquals(1, items.size)
+        assertEquals(LocalTime.of(21, 0), items.single().dailyDeadlineTime)
     }
 
     @Test
-    fun `阶段覆盖最后一天晚于截止日被拦截`() {
+    fun `阶段截止时间只表达每日时刻不再有覆盖末日约束`() {
         val startEpochDay = LocalDate.of(2025, 1, 1).toEpochDay()
-        val deadline = LocalDate.of(2025, 1, 5).atTime(21, 0).atZone(zone).toInstant()
+        // 旧规则（阶段覆盖最后一天不得晚于 deadline 所在日）已推翻：
+        // 同一天开始的一周阶段 + 每日 21:00 截止，覆盖跨到 1/7 也应通过
         val template = HomeworkTemplate(
             content = "每天读课文",
             type = HomeworkType.STAGE,
             stageRange = StageRange.ONE_WEEK,
-            deadline = deadline,
+            deadline = HomeworkDailyDeadlineCodec.timeOfDayCarrier(LocalTime.of(21, 0)),
             creatorRole = CreatorRole.PARENT,
             startEpochDay = startEpochDay,
             zoneId = zone,
         )
-        val error = HomeworkValidators.validateTemplate(template).exceptionOrNull()
+        assertTrue(HomeworkValidators.validateTemplate(template).isSuccess)
+    }
+
+    @Test
+    fun `当天开始加预估时长不得超过当天每日截止时刻`() {
+        val day = LocalDate.of(2025, 1, 1)
+        val cases = listOf(
+            Triple(20, 60, 21 to 0), // 20:00 + 60min = 21:00，正好等于截止时刻 → 通过
+            Triple(20, 61, 21 to 0), // 20:00 + 61min 跨过 21:00 → 拦截
+            Triple(21, 0, 21 to 0), // 21:00 开始且零时长（按 0 分钟算）→ 通过
+        )
+        cases.forEach { (hour, minutes, deadline) ->
+            val start = day.atTime(hour, 0).atZone(zone).toInstant().toEpochMilli()
+            val result = HomeworkValidators.validateScheduleWithinDailyDeadline(
+                startMillis = start,
+                estimatedMinutes = minutes,
+                dailyDeadlineTime = LocalTime.of(deadline.first, deadline.second),
+                zoneId = zone,
+            )
+            val expected = minutes <= 60
+            assertEquals("$hour:$minutes 的每日时刻约束", expected, result is HomeworkValidation.Valid)
+        }
+    }
+
+    @Test
+    fun `每日截止时刻为空或无时刻时不受约束`() {
+        val start = LocalDate.of(2025, 1, 1).atTime(23, 0).atZone(zone).toInstant().toEpochMilli()
         assertEquals(
-            HomeworkValidationError.DEADLINE_EXCEEDED,
-            (error as HomeworkValidationException).error,
+            HomeworkValidation.Valid,
+            HomeworkValidators.validateScheduleWithinDailyDeadline(
+                startMillis = start,
+                estimatedMinutes = 120,
+                dailyDeadlineTime = null,
+                zoneId = zone,
+            ),
         )
     }
 
     @Test
-    fun `阶段作业在覆盖最后一天不晚于截止时通过并逐日展开`() {
+    fun `阶段作业带每日截止时刻时通过且固定产出一条`() {
         val startEpochDay = LocalDate.of(2025, 1, 1).toEpochDay()
-        val deadline = LocalDate.of(2025, 1, 7).atTime(21, 0).atZone(zone).toInstant()
         val template = HomeworkTemplate(
             content = "每天读课文",
             type = HomeworkType.STAGE,
             stageRange = StageRange.ONE_WEEK,
-            deadline = deadline,
+            deadline = HomeworkDailyDeadlineCodec.timeOfDayCarrier(LocalTime.of(21, 0)),
             creatorRole = CreatorRole.PARENT,
             startEpochDay = startEpochDay,
             zoneId = zone,
@@ -435,10 +481,14 @@ class HomeworkValidatorsTest {
             createdAt = Instant.ofEpochMilli(baseMillis),
             firstPriority = 3,
         )
-        assertEquals(StageRange.ONE_WEEK.days, items.size)
-        assertEquals(listOf(3, 4, 5, 6, 7, 8, 9), items.map { it.priority })
+        // 阶段作业 = 一个在阶段内需完成的作业项：固定 1 条，优先级即首条优先级
+        assertEquals(1, items.size)
+        assertEquals(listOf(3), items.map { it.priority })
         assertTrue(items.all { it.status == HomeworkStatus.RECORDED })
         assertTrue(items.all { it.startTime == null })
+        assertEquals(startEpochDay, items.single().stageStartEpochDay)
+        assertEquals(startEpochDay + 6L, items.single().stageLastEpochDay)
+        assertEquals(StageRange.ONE_WEEK.days, items.single().stageCoveredDays)
     }
 
     @Test
@@ -478,14 +528,14 @@ class HomeworkValidatorsTest {
     }
 
     @Test
-    fun `修改类型为阶段作业时校验阶段范围与截止时间`() {
+    fun `修改类型为阶段作业时校验阶段范围与每日截止时刻`() {
         assertEquals(
             HomeworkValidation.Invalid(HomeworkValidationError.MISSING_STAGE_RANGE),
             HomeworkValidators.validateTypeChange(
                 type = HomeworkType.STAGE,
                 stageRange = null,
-                deadlineMillis = millisOf(1, 21),
                 creatorRole = CreatorRole.PARENT,
+                dailyDeadlineTime = LocalTime.of(21, 0),
             ),
         )
         assertEquals(
@@ -493,18 +543,18 @@ class HomeworkValidatorsTest {
             HomeworkValidators.validateTypeChange(
                 type = HomeworkType.STAGE,
                 stageRange = StageRange.ONE_WEEK,
-                deadlineMillis = null,
                 creatorRole = CreatorRole.PARENT,
+                dailyDeadlineTime = null,
             ),
         )
-        // 学生录入阶段作业可不设 deadline
+        // 学生录入阶段作业可不设每日截止时刻
         assertEquals(
             HomeworkValidation.Valid,
             HomeworkValidators.validateTypeChange(
                 type = HomeworkType.STAGE,
                 stageRange = StageRange.ONE_WEEK,
-                deadlineMillis = null,
                 creatorRole = CreatorRole.STUDENT,
+                dailyDeadlineTime = null,
             ),
         )
         // 改回当天作业：阶段范围被忽略
@@ -513,8 +563,8 @@ class HomeworkValidatorsTest {
             HomeworkValidators.validateTypeChange(
                 type = HomeworkType.TODAY,
                 stageRange = null,
-                deadlineMillis = null,
                 creatorRole = CreatorRole.PARENT,
+                dailyDeadlineTime = null,
             ),
         )
     }
@@ -549,6 +599,13 @@ class HomeworkValidatorsTest {
             LocalDate.of(2025, 1, 30).toEpochDay(),
             StageRange.ONE_MONTH.lastEpochDay(start),
         )
+        // 覆盖日集合（进度分母来源）：长度 = days、升序、含首尾
+        val covered = StageRange.ONE_WEEK.coveredEpochDays(start)
+        assertEquals(7, covered.size)
+        assertEquals(start, covered.first())
+        assertEquals(start + 6L, covered.last())
+        assertTrue(StageRange.ONE_WEEK.covers(start, start + 3L))
+        assertTrue(!StageRange.ONE_WEEK.covers(start, start + 7L))
     }
 
     // ---- 业务时间口径 ----

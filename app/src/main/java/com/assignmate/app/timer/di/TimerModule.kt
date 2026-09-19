@@ -4,12 +4,14 @@ import com.assignmate.app.timer.data.AndroidHomeworkAlarmScheduler
 import com.assignmate.app.timer.data.AndroidTimerPermissionChecker
 import com.assignmate.app.timer.data.AndroidTimerTickerController
 import com.assignmate.app.timer.data.DataStoreTimerOverduePromptStore
+import com.assignmate.app.timer.data.DataStoreTimerReminderScheduleStore
 import com.assignmate.app.timer.data.DataStoreTimerRestStartStore
 import com.assignmate.app.timer.data.DataStoreTimerVoiceSettings
 import com.assignmate.app.timer.data.HomeworkAlarmScheduler
 import com.assignmate.app.timer.data.RoomTimerTransactionRunner
 import com.assignmate.app.timer.data.TimerOverduePromptStore
 import com.assignmate.app.timer.data.TimerPermissionChecker
+import com.assignmate.app.timer.data.TimerReminderScheduleStore
 import com.assignmate.app.timer.data.TimerRepository
 import com.assignmate.app.timer.data.TimerRepositoryImpl
 import com.assignmate.app.timer.data.TimerRestStartStore
@@ -37,10 +39,16 @@ import javax.inject.Singleton
  * - [TimerOverduePromptStore] -> [DataStoreTimerOverduePromptStore]（超时鼓励去重记录）；
  * - [TimerPermissionChecker] -> [AndroidTimerPermissionChecker]（通知/精确闹钟权限状态，供 UI 引导）；
  * - [TimerTransactionRunner] -> [RoomTimerTransactionRunner]（写操作事务边界，复用 core 的 AppDatabase）；
- * - [TimerRestStartStore] -> [DataStoreTimerRestStartStore]（休息起点持久化，支撑休息页幂等重建）。
+ * - [TimerRestStartStore] -> [DataStoreTimerRestStartStore]（休息起点持久化，支撑休息页幂等重建）；
+ * - [TimerReminderScheduleStore] -> [DataStoreTimerReminderScheduleStore]（阶段作业逐日闹钟的已设登记表，
+ *   使删除作业/范围变更时能精确取消、不遗留无效闹钟）。
  *
- * 说明：业务时区 [java.time.ZoneId] 已由 homework 模块的 Hilt 模块统一绑定（默认系统时区），
- * 本模块直接注入复用，避免重复绑定造成 DuplicateBindings。
+ * 说明：业务时区 [java.time.ZoneId] 的**全应用唯一来源**是 core 的
+ * [com.assignmate.app.core.di.DailyRecordModule.provideBusinessZoneId]（无限定 [java.time.ZoneId] 绑定，
+ * 默认系统时区），本模块直接注入复用。
+ * **业务模块（含 timer）不得自建业务时区 @Provides/@Binds，也不得再以 `ZoneId.systemDefault()` 兜底**：
+ * 重复绑定既是 Hilt 的 DuplicateBindings 编译错误，也会造成「覆写一处只对一半模块生效」的口径漂移
+ * （跨零点时作业归属日 / 计时归属日 / 统计「今天」不一致）；需要替换时区时只覆写 core 那一处。
  * 通知渠道由 [com.assignmate.app.timer.service.TimerNotifications] 在服务启动/闹钟到点时幂等创建，
  * 无需 Hilt 提供（渠道是 Context 级系统资源，非可注入对象）。
  * 到点提醒的接收器与状态核对**刻意不走 Hilt**（闹钟可能唤起冷启动进程）：见
@@ -91,4 +99,10 @@ abstract class TimerModule {
     @Binds
     @Singleton
     abstract fun bindTimerRestStartStore(impl: DataStoreTimerRestStartStore): TimerRestStartStore
+
+    @Binds
+    @Singleton
+    abstract fun bindTimerReminderScheduleStore(
+        impl: DataStoreTimerReminderScheduleStore,
+    ): TimerReminderScheduleStore
 }

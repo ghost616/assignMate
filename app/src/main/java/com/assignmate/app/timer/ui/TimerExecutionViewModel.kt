@@ -28,6 +28,7 @@ import com.assignmate.app.timer.domain.TimerPhase
 import com.assignmate.app.timer.domain.TimerReminderRules
 import com.assignmate.app.timer.domain.TimerSession
 import com.assignmate.app.timer.domain.TimerSpeechTexts
+import java.time.ZoneId
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.channels.Channel
@@ -79,6 +80,16 @@ class TimerExecutionViewModel @Inject constructor(
     private val overduePromptStore: TimerOverduePromptStore,
     private val permissionChecker: TimerPermissionChecker,
     private val clock: Clock,
+    /**
+     * 业务时区：与 homework / core 的「作业每天详情」同源，用于阶段作业按「当天 + 每日截止时刻」
+     * 判定是否到点（deadline 列对阶段作业不是绝对时间戳，见 [TimerCalculations.absoluteDeadlineMillisOf]）。
+     * **必须由 Hilt 注入**（不提供系统时区默认值）：全应用唯一来源是 core 的
+     * `core.di.DailyRecordModule.provideBusinessZoneId()`（无限定 [ZoneId] 绑定），覆写它即可让
+     * 跨天归属、每天详情折算与超时判定同步切换；
+     * **业务模块（含 timer）不得自建业务时区绑定**——homework / stats 同样消费该绑定，重复声明会是
+     * Hilt 的 DuplicateBindings 编译错误并导致口径漂移。
+     */
+    private val zoneId: ZoneId,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(TimerExecutionUiState())
@@ -349,7 +360,7 @@ class TimerExecutionViewModel @Inject constructor(
         val elapsed = TimerCalculations.elapsedOf(session, state.pauses, now)
         val pausedTotal = TimerCalculations.pauseAccumulatedMillis(state.pauses, now)
         val overdue = session.phase != TimerPhase.FINISHED &&
-            TimerCalculations.isHomeworkOverdue(homework, session, now)
+            TimerCalculations.isHomeworkOverdue(homework, session, now, zoneId)
         val encouragement = state.encouragementText
             ?: if (overdue) {
                 TimerFeedback.encouragementText(state.completedCount, state.totalCount)

@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.assignmate.app.core.data.db.AppDatabase
+import com.assignmate.app.core.data.db.dao.HomeworkDailyRecordDao
 import com.assignmate.app.core.data.db.dao.HomeworkItemDao
 import com.assignmate.app.core.data.db.dao.OcrRetryTaskDao
 import com.assignmate.app.core.data.db.dao.ParentAccountDao
@@ -24,6 +25,8 @@ import javax.inject.Singleton
  *
  * 数据库升级约定：业务模块新增实体/DAO 后，版本号 +1 时在此为 Room.databaseBuilder
  * 链式添加对应 Migration（.addMigrations(...)）；禁止启用 fallbackToDestructiveMigration。
+ * 迁移一律写增量 DDL（CREATE TABLE / ALTER TABLE ADD COLUMN / CREATE INDEX），
+ * 保证旧库升级路径不崩溃；确需丢弃旧数据的取舍在该 Migration 的 KDoc 中显式声明。
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -163,6 +166,66 @@ object DatabaseModule {
         }
     }
 
+    /**
+     * v4 -> v5：新增作业每天详情表 homework_daily_record，并为 timer_session / pause_record
+     * 增加业务自然日维度 epoch_day。全程为**增量 DDL**（CREATE TABLE / ALTER TABLE ADD COLUMN /
+     * CREATE INDEX），不改写既有列，因此 v4 旧库升级到 v5 不会崩溃。
+     *
+     * 取舍说明（用户已确认，当前为开发/测试期、**旧数据可丢弃**）：
+     * - 允许破坏性迁移，但本迁移仍然写成显式的增量语句而非 fallbackToDestructiveMigration()——
+     *   破坏性降级是全局开关，一旦开启会让**未来所有版本**的漏写迁移静默丢库，风险远大于收益；
+     * - epoch_day 是 ALTER TABLE 新加列的列默认值 0：旧库既有计时/暂停行的 epoch_day 均为 0，
+     *   属无意义的占位日；旧数据可丢弃，如需彻底清理请删除库文件（assignmate.db）后重建。
+     */
+    val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `homework_daily_record` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`homework_id` INTEGER NOT NULL, " +
+                    "`student_id` INTEGER NOT NULL, " +
+                    "`epoch_day` INTEGER NOT NULL, " +
+                    "`status` TEXT NOT NULL, " +
+                    "`started_at` INTEGER, " +
+                    "`estimated_minutes` INTEGER, " +
+                    "`actual_minutes` INTEGER, " +
+                    "`pause_count` INTEGER NOT NULL DEFAULT 0, " +
+                    "`paused_total_minutes` INTEGER NOT NULL DEFAULT 0, " +
+                    "`finished_at` INTEGER, " +
+                    "`created_at` INTEGER NOT NULL, " +
+                    "FOREIGN KEY(`homework_id`) REFERENCES `homework_item`(`id`) " +
+                    "ON UPDATE NO ACTION ON DELETE CASCADE " +
+                    ")",
+            )
+            db.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS `index_homework_daily_record_homework_id_epoch_day` " +
+                    "ON `homework_daily_record` (`homework_id`, `epoch_day`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_homework_daily_record_student_id_epoch_day` " +
+                    "ON `homework_daily_record` (`student_id`, `epoch_day`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_homework_daily_record_homework_id` " +
+                    "ON `homework_daily_record` (`homework_id`)",
+            )
+            db.execSQL(
+                "ALTER TABLE `timer_session` ADD COLUMN `epoch_day` INTEGER NOT NULL DEFAULT 0",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_timer_session_homework_id_epoch_day` " +
+                    "ON `timer_session` (`homework_id`, `epoch_day`)",
+            )
+            db.execSQL(
+                "ALTER TABLE `pause_record` ADD COLUMN `epoch_day` INTEGER NOT NULL DEFAULT 0",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_pause_record_homework_id_epoch_day` " +
+                    "ON `pause_record` (`homework_id`, `epoch_day`)",
+            )
+        }
+    }
+
     @Provides
     @Singleton
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
@@ -170,7 +233,7 @@ object DatabaseModule {
             context,
             AppDatabase::class.java,
             CoreConstants.DATABASE_NAME,
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build()
 
     @Provides
     fun provideOcrRetryTaskDao(database: AppDatabase): OcrRetryTaskDao = database.ocrRetryTaskDao()
@@ -189,4 +252,8 @@ object DatabaseModule {
 
     @Provides
     fun providePauseRecordDao(database: AppDatabase): PauseRecordDao = database.pauseRecordDao()
+
+    @Provides
+    fun provideHomeworkDailyRecordDao(database: AppDatabase): HomeworkDailyRecordDao =
+        database.homeworkDailyRecordDao()
 }

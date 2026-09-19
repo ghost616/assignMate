@@ -11,6 +11,9 @@ import com.assignmate.app.auth.data.UpdateVerificationCodeResult
 import com.assignmate.app.auth.domain.Role
 import com.assignmate.app.auth.domain.SessionState
 import com.assignmate.app.auth.domain.Student
+import com.assignmate.app.core.domain.homework.HomeworkDailyRecord
+import com.assignmate.app.core.domain.homework.HomeworkDailyRecordRepository
+import com.assignmate.app.core.domain.homework.HomeworkDayStatus
 import com.assignmate.app.core.domain.time.Clock
 import com.assignmate.app.homework.data.AddHomeworkResult
 import com.assignmate.app.homework.data.HomeworkOperationResult
@@ -20,35 +23,27 @@ import com.assignmate.app.homework.data.HomeworkStatusResult
 import com.assignmate.app.homework.data.ReorderDirection
 import com.assignmate.app.homework.data.ScheduleUpdateResult
 import com.assignmate.app.homework.domain.CreatorRole
+import com.assignmate.app.homework.domain.HomeworkDailyDeadlineCodec
 import com.assignmate.app.homework.domain.HomeworkItem
 import com.assignmate.app.homework.domain.HomeworkStatus
 import com.assignmate.app.homework.domain.HomeworkTemplate
 import com.assignmate.app.homework.domain.HomeworkType
 import com.assignmate.app.homework.domain.StageRange
-import com.assignmate.app.timer.data.TimerCompleteResult
-import com.assignmate.app.timer.data.TimerPauseResult
-import com.assignmate.app.timer.data.TimerRepository
-import com.assignmate.app.timer.data.TimerResumeResult
-import com.assignmate.app.timer.data.TimerStartResult
-import com.assignmate.app.timer.domain.PauseRecord
-import com.assignmate.app.timer.domain.TimerSession
-import com.assignmate.app.timer.domain.TimerSessionDetail
-import com.assignmate.app.timer.domain.TimerPhase
-import com.assignmate.app.timer.domain.TimerSessionSummary
 import java.time.Instant
+import java.time.LocalTime
 import java.time.ZoneId
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 
 /**
- * stats 模块测试替身集合：auth/计时/作业三个仓库的内存替身 + 可推进时钟 + 测试环境聚合。
+ * stats 模块测试替身集合：auth / 作业 / 作业每天详情 三个仓库的内存替身 + 可推进时钟 + 测试环境聚合。
  *
  * 设计取向（与 homework/timer 的测试替身一致）：
  * - 只实现 stats 真正依赖的**读**能力；写操作一律抛 [UnsupportedOperationException]，
  *   一旦被测代码误用会立刻暴露，避免「假绿灯」；
- * - 时刻由 [StatsMutableClock] 显式控制，业务时区固定 Asia/Shanghai，
- *   使「当日窗口 / 跨天裁剪 / 暂停折算」等口径在测试中完全确定。
+ * - 时间维度只在**作业每天详情**上：stats 不再读取计时会话，故本文件不再提供 timer 替身，
+ *   改由 [FakeStatsDailyRecordRepository] 提供按天详情（业务自然日 epochDay 显式落库）。
  */
 
 /**
@@ -132,70 +127,92 @@ internal class FakeStatsAuthRepository(
 }
 
 /**
- * 内存版计时仓库：只提供 stats 聚合所需的两项读能力
- * （[loadSessionsByStudent] / [loadPausesByHomework]），其余能力误用即失败。
+ * 内存版**作业每天详情**仓库：stats 聚合的唯一时间数据源
+ * （[loadByHomework] / [loadByStudentAndDay] / [find]），其余能力误用即失败。
+ *
+ * 观察版（observe*）按接口实现返回当前快照流，生产链路不消费（stats 只做一次性读快照）。
  */
-internal class FakeStatsTimerRepository : TimerRepository {
+internal class FakeStatsDailyRecordRepository : HomeworkDailyRecordRepository {
 
-    private val sessions = mutableListOf<TimerSession>()
-    private val pauses = mutableListOf<PauseRecord>()
+    private val records = mutableListOf<HomeworkDailyRecord>()
 
     /** 读取失败开关：验证仓库把读取异常收敛为失败结果而非向上抛出 */
     var failReads: Boolean = false
 
-    /** 登记一条执行会话 */
-    fun putSession(session: TimerSession) {
-        sessions += session
+    /** 登记一条每天详情 */
+    fun put(record: HomeworkDailyRecord) {
+        records += record
     }
 
-    /** 登记一条暂停明细 */
-    fun putPause(pause: PauseRecord) {
-        pauses += pause
+    override fun observeByStudentAndDay(
+        studentId: Long,
+        epochDay: Long,
+    ): Flow<List<HomeworkDailyRecord>> = flowOf(byStudentAndDay(studentId, epochDay))
+
+    override suspend fun loadByStudentAndDay(
+        studentId: Long,
+        epochDay: Long,
+    ): List<HomeworkDailyRecord> {
+        failIfNeeded()
+        return byStudentAndDay(studentId, epochDay)
     }
 
-    override suspend fun loadSessionsByStudent(studentId: Long): List<TimerSession> {
+    override suspend fun find(homeworkId: Long, epochDay: Long): HomeworkDailyRecord? {
+        failIfNeeded()
+        return records.firstOrNull { it.homeworkId == homeworkId && it.epochDay == epochDay }
+    }
+
+    override suspend fun loadByHomework(homeworkId: Long): List<HomeworkDailyRecord> {
+        failIfNeeded()
+        return records.filter { it.homeworkId == homeworkId }.sortedBy { it.epochDay }
+    }
+
+    override fun observeByHomework(homeworkId: Long): Flow<List<HomeworkDailyRecord>> =
+        flowOf(records.filter { it.homeworkId == homeworkId }.sortedBy { it.epochDay })
+
+    // ---- stats 不涉及的写能力：误用即失败 ----
+
+    override suspend fun upsert(record: HomeworkDailyRecord): Long = unsupported()
+
+    override suspend fun upsertStatus(
+        homeworkId: Long,
+        studentId: Long,
+        epochDay: Long,
+        status: HomeworkDayStatus,
+        nowMillis: Long,
+    ): Long = unsupported()
+
+    override suspend fun updateStatus(id: Long, status: HomeworkDayStatus): Unit = unsupported()
+
+    override suspend fun updateExecution(
+        id: Long,
+        startedAtMillis: Long?,
+        estimatedMinutes: Int?,
+        actualMinutes: Int?,
+        pauseCount: Int,
+        pausedTotalMinutes: Int,
+        finishedAtMillis: Long?,
+    ): Unit = unsupported()
+
+    override suspend fun deleteByHomework(homeworkId: Long): Int = unsupported()
+
+    /** 业务自然日折算：与生产实现同口径（按注入的业务时区折算，不用 UTC 毫秒） */
+    override fun epochDayOf(millis: Long): Long =
+        Instant.ofEpochMilli(millis).atZone(StatsRepositoryTestEnv.ZONE).toLocalDate().toEpochDay()
+
+    private fun byStudentAndDay(studentId: Long, epochDay: Long): List<HomeworkDailyRecord> =
+        records
+            .filter { it.studentId == studentId && it.epochDay == epochDay }
+            .sortedBy { it.homeworkId }
+
+    private fun failIfNeeded() {
         if (failReads) {
             throw IllegalStateException("模拟数据库读取失败")
         }
-        return sessions.filter { it.studentId == studentId }.sortedBy { it.startedAt }
     }
-
-    override suspend fun loadPausesByHomework(homeworkId: Long): List<PauseRecord> {
-        if (failReads) {
-            throw IllegalStateException("模拟数据库读取失败")
-        }
-        return pauses.filter { it.homeworkId == homeworkId }.sortedBy { it.pauseStartAt }
-    }
-
-    override suspend fun loadSessionsByHomework(homeworkId: Long): List<TimerSession> =
-        sessions.filter { it.homeworkId == homeworkId }.sortedBy { it.startedAt }
-
-    override suspend fun loadSession(sessionId: Long): TimerSession? = unsupported()
-
-    override suspend fun loadSessionDetail(sessionId: Long): TimerSessionDetail? = unsupported()
-
-    override suspend fun findActiveSession(studentId: Long): TimerSession? = unsupported()
-
-    override suspend fun findActiveSessionByHomework(homeworkId: Long): TimerSession? = unsupported()
-
-    override suspend fun findLatestSession(homeworkId: Long): TimerSession? = unsupported()
-
-    override suspend fun loadPauses(sessionId: Long): List<PauseRecord> = unsupported()
-
-    override suspend fun summarize(sessionId: Long): TimerSessionSummary? = unsupported()
-
-    override suspend fun startSession(homeworkId: Long, sessionRole: Role): TimerStartResult =
-        unsupported()
-
-    override suspend fun pauseSession(sessionId: Long): TimerPauseResult = unsupported()
-
-    override suspend fun resumeSession(sessionId: Long): TimerResumeResult = unsupported()
-
-    override suspend fun completeSession(sessionId: Long, sessionRole: Role): TimerCompleteResult =
-        unsupported()
 
     private fun <T> unsupported(): T =
-        throw UnsupportedOperationException("stats 模块单测不涉及该 timer 能力")
+        throw UnsupportedOperationException("stats 模块单测不涉及该每天详情写能力")
 }
 
 /** 内存版作业仓库：只提供清单与单项读取，其余能力误用即失败 */
@@ -296,7 +313,7 @@ internal class FakeStatsHomeworkRepository : HomeworkRepository {
         throw UnsupportedOperationException("stats 模块单测不涉及该 homework 能力")
 }
 
-/** 可推进时钟：固定起点，用例可显式推进以构造暂停/跨天场景 */
+/** 可推进时钟：固定起点，用例可显式推进（仓库据它解析「今天」） */
 internal class StatsMutableClock(initialMillis: Long) : Clock {
 
     private val current = AtomicLong(initialMillis)
@@ -316,7 +333,11 @@ internal class StatsMutableClock(initialMillis: Long) : Clock {
 
 /**
  * stats 仓库测试环境：内存替身 + 真实 [StatsRepositoryImpl]（被测对象）。
- * 业务时区固定 Asia/Shanghai，固定时钟起点为 [FIXED_MILLIS]（2023-11-14 00:09:00 +08:00）。
+ * 业务时区默认固定 Asia/Shanghai，固定时钟为 [FIXED_MILLIS]（2023-11-14 00:09:00 +08:00，即基准日 [DAY_EPOCH]）。
+ *
+ * [zoneId] 可覆写：**这正是「覆写 core 唯一业务时区来源」在单测里的等价形态**——
+ * 覆写后仓库的「今天」、当天作业归属日、阶段可见性与阶段打卡进度必须一起切换
+ * （见 `StatsBusinessZoneRepositoryTest`）。
  */
 internal class StatsRepositoryTestEnv(
     initialSession: SessionState = SessionState(
@@ -324,20 +345,22 @@ internal class StatsRepositoryTestEnv(
         parentId = PARENT_ID,
         studentId = STUDENT_ID,
     ),
+    /** 业务时区（默认与生产 homework 模块绑定口径一致；跨时区用例传入覆写值） */
+    val zoneId: ZoneId = ZONE,
 ) {
 
     val clock = StatsMutableClock(FIXED_MILLIS)
     val authRepository = FakeStatsAuthRepository(initialSession)
-    val timerRepository = FakeStatsTimerRepository()
+    val dailyRecordRepository = FakeStatsDailyRecordRepository()
     val homeworkRepository = FakeStatsHomeworkRepository()
 
-    /** 被测对象：真实实现 + 内存替身 + 固定时钟/时区 */
+    /** 被测对象：真实实现 + 内存替身 + 固定时钟/业务时区 */
     val repository: StatsRepository = StatsRepositoryImpl(
         homeworkRepository = homeworkRepository,
-        timerRepository = timerRepository,
+        dailyRecordRepository = dailyRecordRepository,
         authRepository = authRepository,
         clock = clock,
-        zoneId = ZONE,
+        zoneId = zoneId,
     )
 
     init {
@@ -365,72 +388,96 @@ internal class StatsRepositoryTestEnv(
         /** 2023-11-14 00:00:00 +08:00 */
         const val DAY_START_MILLIS = 1_699_891_200_000L
 
-        /** 2023-11-14 的 UTC 纪元日 */
+        /** 2023-11-14 的业务自然日（纪元日） */
         const val DAY_EPOCH = 19_675L
 
         /** 一分钟（毫秒） */
         const val MINUTE = 60_000L
 
-        /** 当日窗口内第 [minutes] 分钟对应的时刻 */
+        /** 当日窗口内第 [minutes] 分钟对应的时刻（构造 startedAt/finishedAt 用） */
         fun at(minutes: Long): Long = DAY_START_MILLIS + minutes * MINUTE
+
+        /** 相对基准日的自然日偏移 */
+        fun day(offsetDays: Long): Long = DAY_EPOCH + offsetDays
     }
 }
 
-/** 构造作业项测试数据（不经数据库） */
+/** 构造作业项测试数据（不经数据库；[createdAtMillis] 决定当天作业的「归属日」） */
 internal fun statsTestHomework(
     id: Long,
     content: String = "作业$id",
-    status: HomeworkStatus = HomeworkStatus.PENDING,
+    status: HomeworkStatus = HomeworkStatus.RECORDED,
     estimatedMinutes: Int? = 30,
     priority: Int = 100,
     studentId: Long = StatsRepositoryTestEnv.STUDENT_ID,
+    type: HomeworkType = HomeworkType.TODAY,
+    stageRange: StageRange? = null,
+    createdAtMillis: Long = StatsRepositoryTestEnv.DAY_START_MILLIS,
+    deadline: Instant? = null,
 ): HomeworkItem = HomeworkItem(
     id = id,
     parentAccountId = StatsRepositoryTestEnv.PARENT_ID,
     studentId = studentId,
     content = content,
-    type = HomeworkType.TODAY,
-    stageRange = null,
-    deadline = null,
+    type = type,
+    stageRange = stageRange,
+    deadline = deadline,
     priority = priority,
-    startTime = Instant.ofEpochMilli(StatsRepositoryTestEnv.DAY_START_MILLIS),
+    startTime = Instant.ofEpochMilli(createdAtMillis),
     estimatedMinutes = estimatedMinutes,
     status = status,
     createdByRole = CreatorRole.PARENT,
-    createdAt = Instant.ofEpochMilli(StatsRepositoryTestEnv.DAY_START_MILLIS),
+    createdAt = Instant.ofEpochMilli(createdAtMillis),
 )
 
-/** 构造执行会话测试数据（默认按是否已结束推导阶段：未结束 RUNNING，已结束 FINISHED） */
-internal fun statsTestSession(
-    sessionId: Long,
-    homeworkId: Long,
-    startedAtMillis: Long,
-    finishedAtMillis: Long? = null,
+/**
+ * 构造阶段作业项测试数据（一条作业项覆盖整段）：
+ * 起始日与每日截止时刻按生产口径编码进 deadline，故 [HomeworkItem.stageStartEpochDay] /
+ * [HomeworkItem.stageCoveredDays] 可正常还原（「今天是否落在阶段范围内」由它们决定）。
+ */
+internal fun statsTestStageHomework(
+    id: Long,
+    content: String = "阶段作业$id",
+    estimatedMinutes: Int? = 30,
+    priority: Int = 100,
     studentId: Long = StatsRepositoryTestEnv.STUDENT_ID,
-    phase: TimerPhase = if (finishedAtMillis == null) TimerPhase.RUNNING else TimerPhase.FINISHED,
-): TimerSession = TimerSession(
-    id = sessionId,
+    stageRange: StageRange = StageRange.ONE_WEEK,
+    startEpochDay: Long = StatsRepositoryTestEnv.DAY_EPOCH,
+): HomeworkItem = statsTestHomework(
+    id = id,
+    content = content,
+    estimatedMinutes = estimatedMinutes,
+    priority = priority,
+    studentId = studentId,
+    type = HomeworkType.STAGE,
+    stageRange = stageRange,
+    createdAtMillis = StatsRepositoryTestEnv.DAY_START_MILLIS,
+    deadline = HomeworkDailyDeadlineCodec.encodeStageDaily(startEpochDay, LocalTime.of(21, 0)),
+)
+
+/** 构造作业每天详情测试数据（stats 的唯一时间数据源） */
+internal fun statsTestDayRecord(
+    homeworkId: Long,
+    epochDay: Long = StatsRepositoryTestEnv.DAY_EPOCH,
+    studentId: Long = StatsRepositoryTestEnv.STUDENT_ID,
+    status: HomeworkDayStatus = HomeworkDayStatus.NOT_STARTED,
+    startedAtMillis: Long? = null,
+    estimatedMinutes: Int? = null,
+    actualMinutes: Int? = null,
+    pauseCount: Int = 0,
+    pausedTotalMinutes: Int = 0,
+    finishedAtMillis: Long? = null,
+): HomeworkDailyRecord = HomeworkDailyRecord(
+    id = 0L,
     homeworkId = homeworkId,
     studentId = studentId,
-    parentAccountId = StatsRepositoryTestEnv.PARENT_ID,
-    startedAt = Instant.ofEpochMilli(startedAtMillis),
-    finishedAt = finishedAtMillis?.let { Instant.ofEpochMilli(it) },
-    pausedTotalMillis = 0L,
-    pauseCount = 0,
-    phase = phase,
-)
-
-/** 构造暂停明细测试数据 */
-internal fun statsTestPause(
-    id: Long,
-    sessionId: Long,
-    homeworkId: Long,
-    startMillis: Long,
-    endMillis: Long? = null,
-): PauseRecord = PauseRecord(
-    id = id,
-    sessionId = sessionId,
-    homeworkId = homeworkId,
-    pauseStartAt = Instant.ofEpochMilli(startMillis),
-    pauseEndAt = endMillis?.let { Instant.ofEpochMilli(it) },
+    epochDay = epochDay,
+    status = status,
+    startedAtMillis = startedAtMillis,
+    estimatedMinutes = estimatedMinutes,
+    actualMinutes = actualMinutes,
+    pauseCount = pauseCount,
+    pausedTotalMinutes = pausedTotalMinutes,
+    finishedAtMillis = finishedAtMillis,
+    createdAtMillis = StatsRepositoryTestEnv.DAY_START_MILLIS,
 )

@@ -18,9 +18,10 @@ object CoreConstants {
      * 禁止使用破坏性降级（fallbackToDestructiveMigration）。
      *
      * 版本演进：v1 = ocr_retry_task（待重试 OCR 任务）；v2 = +parent_account（家长账号）、+student（学生档案）；
-     * v3 = +homework_item（作业项）；v4 = +timer_session（计时执行会话）、+pause_record（暂停明细）。
+     * v3 = +homework_item（作业项）；v4 = +timer_session（计时执行会话）、+pause_record（暂停明细）；
+     * v5 = +homework_daily_record（作业每天详情）、timer_session / pause_record 增加 epoch_day（业务自然日）。
      */
-    const val DATABASE_VERSION = 4
+    const val DATABASE_VERSION = 5
 
     // ---- DataStore 偏好存储 ----
     /** 全局偏好 DataStore 文件名（OCR 厂商配置等键值存放于此） */

@@ -3,6 +3,7 @@ package com.assignmate.app.homework.data
 import com.assignmate.app.auth.domain.Role
 import com.assignmate.app.homework.domain.CreatorRole
 import com.assignmate.app.homework.domain.HomeworkConstants
+import com.assignmate.app.homework.domain.HomeworkDailyDeadlineCodec
 import com.assignmate.app.homework.domain.HomeworkStatus
 import com.assignmate.app.homework.domain.HomeworkTemplate
 import com.assignmate.app.homework.domain.HomeworkType
@@ -10,6 +11,7 @@ import com.assignmate.app.homework.domain.HomeworkValidationError
 import com.assignmate.app.homework.domain.StageRange
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.ZoneId
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
@@ -136,7 +138,7 @@ class HomeworkRepositoryImplTest {
     }
 
     @Test
-    fun `一周阶段作业逐日展开七条`() = runTest {
+    fun `一周阶段作业固定产出一条且带每日截止时刻`() = runTest {
         val env = HomeworkTestEnv()
         val parentId = env.loginAsParent()
         val studentId = env.addStudent(parentId)
@@ -146,7 +148,7 @@ class HomeworkRepositoryImplTest {
                 content = "每天读课文",
                 type = HomeworkType.STAGE,
                 stageRange = StageRange.ONE_WEEK,
-                deadline = Instant.ofEpochMilli(millisAt(21, dayOffset = 6)),
+                deadline = HomeworkDailyDeadlineCodec.timeOfDayCarrier(LocalTime.of(21, 0)),
                 creatorRole = CreatorRole.PARENT,
                 startEpochDay = env.todayEpochDay(),
                 zoneId = zone,
@@ -155,11 +157,16 @@ class HomeworkRepositoryImplTest {
         )
 
         val items = (result as AddHomeworkResult.Success).items
-        assertEquals(7, items.size)
-        assertEquals(listOf(0, 1, 2, 3, 4, 5, 6), items.map { it.priority })
-        assertTrue(items.all { it.type == HomeworkType.STAGE })
-        assertTrue(items.all { it.stageRange == StageRange.ONE_WEEK })
-        assertTrue(items.all { it.status == HomeworkStatus.RECORDED })
+        // 阶段作业 = 一个在阶段内需完成的作业项：固定 1 条（不再逐日展开）
+        assertEquals(1, items.size)
+        val item = items.single()
+        assertEquals(0, item.priority)
+        assertEquals(HomeworkType.STAGE, item.type)
+        assertEquals(StageRange.ONE_WEEK, item.stageRange)
+        assertEquals(HomeworkStatus.RECORDED, item.status)
+        assertEquals(LocalTime.of(21, 0), item.dailyDeadlineTime)
+        assertEquals(env.todayEpochDay(), item.stageStartEpochDay)
+        assertEquals(env.todayEpochDay() + 6L, item.stageLastEpochDay)
     }
 
     @Test
@@ -724,7 +731,7 @@ class HomeworkRepositoryImplTest {
                 otherItem.id,
                 HomeworkType.STAGE,
                 StageRange.ONE_WEEK,
-                Instant.ofEpochMilli(millisAt(21, dayOffset = 10)),
+                HomeworkDailyDeadlineCodec.timeOfDayCarrier(LocalTime.of(21, 0)),
                 Role.PARENT,
             ),
         )
@@ -815,7 +822,7 @@ class HomeworkRepositoryImplTest {
     }
 
     @Test
-    fun `修改类型为阶段作业时校验阶段范围与截止时间`() = runTest {
+    fun `修改类型为阶段作业时校验阶段范围与每日截止时刻`() = runTest {
         val env = HomeworkTestEnv()
         val parentId = env.loginAsParent()
         val studentId = env.addStudent(parentId)
@@ -836,19 +843,22 @@ class HomeworkRepositoryImplTest {
             ),
         )
 
-        val deadline = Instant.ofEpochMilli(millisAt(21, dayOffset = 10))
+        // 阶段截止时间只承载「每日时刻」：传入时刻载体后落库为可唯一还原的每日时刻
         val ok = env.repository.updateTemplate(
             item.id,
             HomeworkType.STAGE,
             StageRange.ONE_WEEK,
-            deadline,
+            HomeworkDailyDeadlineCodec.timeOfDayCarrier(LocalTime.of(20, 30)),
             Role.PARENT,
         )
         assertTrue(ok is HomeworkOperationResult.Success)
         val updated = (ok as HomeworkOperationResult.Success).item
         assertEquals(HomeworkType.STAGE, updated.type)
         assertEquals(StageRange.ONE_WEEK, updated.stageRange)
-        assertEquals(deadline, updated.deadline)
+        assertEquals(LocalTime.of(20, 30), updated.dailyDeadlineTime)
+        // 阶段作业的起始日取自创建日，覆盖最后一天 = 起始日 + 6
+        assertEquals(env.todayEpochDay(), updated.stageStartEpochDay)
+        assertEquals(env.todayEpochDay() + 6L, updated.stageLastEpochDay)
     }
 
     @Test
@@ -856,20 +866,19 @@ class HomeworkRepositoryImplTest {
         val env = HomeworkTestEnv()
         val parentId = env.loginAsParent()
         val studentId = env.addStudent(parentId)
-        val deadline = Instant.ofEpochMilli(millisAt(21, dayOffset = 10))
         val stage = env.repository.addHomework(
             HomeworkTemplate(
                 content = "阶段作业",
                 type = HomeworkType.STAGE,
                 stageRange = StageRange.ONE_WEEK,
-                deadline = deadline,
+                deadline = HomeworkDailyDeadlineCodec.timeOfDayCarrier(LocalTime.of(21, 0)),
                 creatorRole = CreatorRole.PARENT,
                 startEpochDay = env.todayEpochDay(),
                 zoneId = zone,
             ),
             studentId,
         )
-        val first = (stage as AddHomeworkResult.Success).items.first()
+        val first = (stage as AddHomeworkResult.Success).items.single()
 
         val result = env.repository.updateTemplate(first.id, HomeworkType.TODAY, null, null, Role.PARENT)
         assertTrue(result is HomeworkOperationResult.Success)
@@ -972,33 +981,37 @@ class HomeworkRepositoryImplTest {
     }
 
     @Test
-    fun `修改为阶段作业时阶段覆盖最后一天不得晚于新截止日`() = runTest {
+    fun `改为阶段作业时既有排定时间段须落在每日截止时刻之前`() = runTest {
         val env = HomeworkTestEnv()
         val parentId = env.loginAsParent()
         val studentId = env.addStudent(parentId)
         val item = (env.addTodayHomework(studentId, "作业") as AddHomeworkResult.Success).items.single()
 
-        // 一周阶段自创建日（2023-11-15）起覆盖至 11-21，截止日设在 11-18 应被拦截
-        val tooEarly = env.repository.updateTemplate(
-            item.id,
-            HomeworkType.STAGE,
-            StageRange.ONE_WEEK,
-            Instant.ofEpochMilli(millisAt(21, dayOffset = 3)),
-            Role.PARENT,
-        )
+        // 既有排定：16:00 开始 120 分钟（结束 18:00）
+        env.repository.updateSchedule(item.id, Instant.ofEpochMilli(millisAt(16)), 120, Role.PARENT)
+
+        // 每日截止时刻 17:00：18:00 结束跨过该时刻，拦截
         assertEquals(
             HomeworkOperationResult.TemplateInvalid(HomeworkValidationError.DEADLINE_EXCEEDED),
-            tooEarly,
+            env.repository.updateTemplate(
+                item.id,
+                HomeworkType.STAGE,
+                StageRange.ONE_WEEK,
+                HomeworkDailyDeadlineCodec.timeOfDayCarrier(LocalTime.of(17, 0)),
+                Role.PARENT,
+            ),
         )
 
-        val ok = env.repository.updateTemplate(
-            item.id,
-            HomeworkType.STAGE,
-            StageRange.ONE_WEEK,
-            Instant.ofEpochMilli(millisAt(21, dayOffset = 6)),
-            Role.PARENT,
+        // 每日截止时刻 18:00：正好等于排定结束时刻，通过
+        assertTrue(
+            env.repository.updateTemplate(
+                item.id,
+                HomeworkType.STAGE,
+                StageRange.ONE_WEEK,
+                HomeworkDailyDeadlineCodec.timeOfDayCarrier(LocalTime.of(18, 0)),
+                Role.PARENT,
+            ) is HomeworkOperationResult.Success,
         )
-        assertTrue(ok is HomeworkOperationResult.Success)
     }
 
     // ---- 状态流转 ----

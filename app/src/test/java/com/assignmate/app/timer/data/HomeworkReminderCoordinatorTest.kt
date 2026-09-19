@@ -144,7 +144,12 @@ class HomeworkReminderCoordinatorTest {
             scheduler = scheduler,
             homeworkRepository = homeworkRepository,
             clock = clock,
-            coordinator = HomeworkReminderCoordinator(homeworkRepository, scheduler, clock),
+            coordinator = HomeworkReminderCoordinator(
+                homeworkRepository,
+                scheduler,
+                clock,
+                TimerTestEnv.ZONE,
+            ),
         )
     }
 

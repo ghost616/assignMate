@@ -61,7 +61,8 @@ import javax.inject.Inject
  * （homework → [HomeworkDestination.studentIdOf] / [HomeworkDestination.homeworkIdOf]；
  * stats → [StatsDestination.studentIdOf] / [StatsDestination.homeworkIdOf] / [StatsDestination.epochDayOf]）
  * 解析，避免各页面重复写 `toLongOrNull() ?: 0L` 造成口径漂移。
- * stats 的日期查询参数（DAY_SUMMARY 的 `epochDay`、HISTORY 的 `fromEpochDay`/`toEpochDay`）一律声明
+ * stats 的日期查询参数（DAY_SUMMARY 的 `epochDay`、HISTORY 的 `fromEpochDay`/`toEpochDay`，
+ * 以及 framework 在 ITEM_DETAIL 上补的 `epochDay`）一律声明
  * `defaultValue = [StatsDestination.ARG_EPOCH_DAY_TODAY]`（-1 = 未指定 → 页面按会话时区解析为「今天」）：
  * 可选参数才允许不带查询串导航，缺失时回落「今天」而非抛缺少必填参数异常。
  * - 家长进入清单：回调携带被选学生 id（`homework/list/{studentId}`）；
@@ -84,7 +85,10 @@ import javax.inject.Inject
  *   日期缺省（[StatsDestination.ARG_EPOCH_DAY_TODAY]）= 盘点「今天」；
  *   因清单已把 studentId 解析到位，此处不再传 [AppDestination.UNSPECIFIED_STUDENT_ID]，
  *   盘点页/详情页仍按会话再做一层越权收敛（家长需正数学生、学生固定本人）；
- * - 盘点「查看这一项详情」：[DaySummaryRoute] 的 `onOpenItemDetail(studentId, homeworkId)` → [StatsDestination.ITEM_DETAIL]；
+ * - 盘点「查看这一项详情」：[DaySummaryRoute] 的 `onOpenItemDetail(studentId, homeworkId)` → 单项详情页
+ *   （[AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY]，即 stats 既有详情路由 + 可选 `epochDay` 查询参数）；
+ *   日期取盘点页自身正在展示的那一天（历史日盘点 → 该历史日详情；当日盘点 → 「今天」哨兵），
+ *   故「历史某日盘点 → 点开某项 → 落到该日详情」成立；
  * - 盘点「查看历史完成情况」：[DaySummaryRoute] 的 `onOpenHistory(studentId)` → [StatsDestination.HISTORY]，
  *   日期范围缺省传 [StatsDestination.ARG_EPOCH_DAY_TODAY] 哨兵，由页面按会话时区解析为「今天」；
  * - 历史「选择日期范围」：[HistoryRoute] 的 `onPickRange(studentId, from, to)` → 弹出日期范围选择器
@@ -99,7 +103,16 @@ import javax.inject.Inject
  *   [ReminderSyncDispatcher.cancelHomeworkReminderSync]（取消旧闹钟，避免提醒指向已删除作业）；
  * - 重排时间保存：[HomeworkTimeSetRoute] 的 `onHomeworkScheduleSaved(homeworkId)`（排定成功后一次）→
  *   [ReminderSyncDispatcher.syncHomeworkReminder]（按新时刻重设，旧时刻随之取消）；
- * - 两个动作均为「调用即返回」：在进程级作用域执行、失败只记日志，
+ * - 录入页保存：[HomeworkEntryRoute] 的 `onSaved(savedHomeworkId)`（保存成功后一次，携带新建作业项的
+ *   真实 id）→ [ReminderSyncDispatcher.syncHomeworkSavedReminder]：**按该 id 精确同步**——
+ *   当天作业设单次提醒、阶段作业按阶段覆盖区间逐日排定（复用协调器既有 `requestCodeOf(homeworkId, epochDay)`
+ *   请求码口径）；因不依赖学生 id，学生端「未指定学生」（路由 studentId = 0）同样成立；
+ * - 模板页保存：[HomeworkTemplateRoute] 的 `onSaved(savedHomeworkId)`（保存成功后一次）→
+ *   同一入口：优先用事件回抛的作业 id（编辑 = 被编辑作业、新建 = 新建作业项 id），
+ *   事件拿不到 id 时回落路由上的 homeworkId；两者都非正数时才由接线层退化为按学生「整份清单纠正」
+ *   （既有入口，幂等）。覆盖「阶段范围 / 每日截止时刻变更后重排」与
+ *   「类型由阶段切回当天时清掉历史逐日闹钟」两条时效性路径；
+ * - 四个动作均为「调用即返回」：在进程级作用域执行、失败只记日志，
  *   不阻塞主线程，也不影响删除/保存主流程；
  * - 计时入口（进入执行页/下一项页）的整份清单纠正逻辑保持不变。
  *
@@ -135,7 +148,8 @@ import javax.inject.Inject
 fun AssignMateNavHost(
     navController: NavHostController = rememberNavController(),
     startDestination: String = AppDestination.START,
-    // framework 侧到点提醒同步接线（Hilt 注入）：删除作业 → 取消提醒、重排时间保存 → 按新时刻同步。
+    // framework 侧到点提醒同步接线（Hilt 注入）：删除作业 → 取消提醒；重排时间保存、录入页新建、
+    // 模板页保存 → 按保存成功事件回抛的作业 id 精确同步（拿不到 id 才按学生整份清单兜底）。
     // 内部走进程级作用域，页面 popBackStack 后仍能跑完；调用即返回、失败静默降级。
     reminderSync: ReminderSyncDispatcher = hiltViewModel<AssignMateNavHostViewModel>().reminderSync,
 ) {
@@ -241,7 +255,19 @@ fun AssignMateNavHost(
             HomeworkEntryRoute(
                 studentId = entry.studentIdArg(),
                 onBack = { navController.popBackStack() },
-                onSaved = { navController.popBackStack() },
+                onSaved = { savedHomeworkId ->
+                    // 保存成功：按事件回抛的**新作业 id** 精确同步该作业的到点提醒，再回清单。
+                    // 录入页可建「当天作业」或「阶段作业」：阶段作业由协调器按阶段覆盖区间逐日排定
+                    // （请求码仍是既有的 requestCodeOf(homeworkId, epochDay) 口径），当天作业按时刻设单次提醒。
+                    // 因为按 id 同步不依赖学生 id，学生端会话（路由 studentId = 0 = 未指定学生）同样成立，
+                    // 不再出现「该新建作业在进清单/计时页之前没有逐日闹钟」的缺口；
+                    // 若事件拿不到 id，才由接线层回落到按学生整份清单纠正（见 ReminderSyncDispatcher）。
+                    reminderSync.syncHomeworkSavedReminder(
+                        studentId = entry.studentIdArg(),
+                        savedHomeworkId = savedHomeworkId,
+                    )
+                    navController.popBackStack()
+                },
                 // 「去设置」引导：识别服务未配置时（家长会话）跳 OCR 配置页；
                 // 是否展示该入口由 homework 按会话角色决定，framework 只统一注入跳转
                 onGoToOcrSettings = { navController.toSettingsOcrConfig() },
@@ -262,7 +288,20 @@ fun AssignMateNavHost(
                 studentId = entry.studentIdArg(),
                 homeworkId = entry.homeworkIdArg(),
                 onBack = { navController.popBackStack() },
-                onSaved = { navController.popBackStack() },
+                onSaved = { savedHomeworkId ->
+                    // 保存成功：先按**事件回抛的作业 id** 精确同步该作业的到点提醒，再回清单。
+                    // 模板页可改「阶段范围 / 每日截止时刻 / 类型（阶段 ↔ 当天）」，与时间设定页同理，
+                    // 保存后必须重排/取消防闹钟（类型切回 TODAY 时既有逐日闹钟也必须清掉）。
+                    // 编辑既有作业时事件回抛的是被编辑作业 id；新建时回抛新建作业项的真实 id，
+                    // 故新建作业也能按 id 精确同步、无需再退化为整份清单纠正。
+                    // 事件拿不到 id（非正数）时回落到路由上的 homeworkId（编辑语义下即被编辑作业），
+                    // 两者都拿不到才由接线层按学生兜底（见 ReminderSyncDispatcher）。
+                    reminderSync.syncHomeworkSavedReminder(
+                        studentId = entry.studentIdArg(),
+                        savedHomeworkId = savedHomeworkId.takeIf { it > 0L } ?: entry.homeworkIdArg(),
+                    )
+                    navController.popBackStack()
+                },
             )
         }
         // ---- homework：时间设定 / 编辑 ----
@@ -365,26 +404,42 @@ fun AssignMateNavHost(
                 // 盘点日期：清单入口为「今天」哨兵，历史入口为所选自然日
                 epochDay = entry.statsEpochDayArg(StatsDestination.ARG_EPOCH_DAY),
                 onBack = { navController.popBackStack() },
-                // 「查看这一项详情」：携带盘点页解析出的学生 + 该项作业
+                // 「查看这一项详情」：携带盘点页解析出的学生 + 该项作业 + **本页正在展示的日期**，
+                // 使「历史某日盘点 → 点开某项」落在该历史日的详情上（不再落到「今天」）；
+                // 日期与页面入参同源（同一 statsEpochDayArg 解析，纯函数无副作用）
                 onOpenItemDetail = { studentId, homeworkId ->
-                    navController.toStatsItemDetail(studentId, homeworkId)
+                    navController.toStatsItemDetail(
+                        studentId = studentId,
+                        homeworkId = homeworkId,
+                        epochDay = entry.statsEpochDayArg(StatsDestination.ARG_EPOCH_DAY),
+                    )
                 },
                 // 「查看历史完成情况」：查询范围缺省为「今天」，由历史页按会话时区解析
                 onOpenHistory = { studentId -> navController.toStatsHistory(studentId) },
             )
         }
-        // ---- stats：单项详情页（预估 / 实际 / 暂停时长 + 困难度提示） ----
+        // ---- stats：单项详情页（预估 / 实际 / 暂停时长 + 困难度提示；日期为可选查询参数，缺省「今天」） ----
         composable(
-            route = StatsDestination.ITEM_DETAIL,
+            // 注册模板 = stats 既有路径模板 + framework 补的可选 epochDay 查询参数
+            // （见 AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY；不动 stats 生产代码）
+            route = AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY,
             arguments = listOf(
                 navArgument(StatsDestination.ARG_STUDENT_ID) { type = NavType.StringType },
                 navArgument(StatsDestination.ARG_HOMEWORK_ID) { type = NavType.StringType },
+                // 查看日期为可选查询参数（缺省 = [StatsDestination.ARG_EPOCH_DAY_TODAY]，页面解析为「今天」）：
+                // 可选参数才允许不带查询串的既有深链接（stats/item/{studentId}/{homeworkId}）继续命中
+                navArgument(StatsDestination.ARG_EPOCH_DAY) {
+                    type = NavType.StringType
+                    defaultValue = StatsDestination.ARG_EPOCH_DAY_TODAY.toString()
+                },
             ),
         ) { entry ->
             ItemDetailRoute(
                 studentId = entry.statsStudentIdArg(),
                 homeworkId = entry.statsHomeworkIdArg(),
                 onBack = { navController.popBackStack() },
+                // 查看日期：历史日盘点入口透传该日，清单/当日盘点入口为「今天」哨兵
+                epochDay = entry.statsEpochDayArg(StatsDestination.ARG_EPOCH_DAY),
             )
         }
         // ---- stats：历史查询页（按日期 / 日期范围查看历史完成情况） ----
@@ -640,9 +695,23 @@ private fun isStatsHistory(entry: androidx.navigation.NavBackStackEntry): Boolea
 private fun isStatsDaySummary(entry: androidx.navigation.NavBackStackEntry): Boolean =
     entry.destination.route == StatsDestination.DAY_SUMMARY
 
-/** 进入 stats 单项详情页：携带盘点页解析出的学生 id 与该作业 id，返回键 popBackStack 回盘点页。 */
-private fun NavHostController.toStatsItemDetail(studentId: Long, homeworkId: Long) {
-    navigate(StatsDestination.itemDetailRoute(studentId, homeworkId))
+/**
+ * 进入 stats 单项详情页：携带盘点页解析出的学生 id、该作业 id 与**盘点页正在展示的日期**，
+ * 返回键 popBackStack 回盘点页。
+ *
+ * 日期透传是本方法存在的意义：「历史某日盘点 → 点开某项 → 查看该日详情」若不带日期，
+ * 详情页会按缺省语义落到「今天」（[StatsDestination.ARG_EPOCH_DAY_TODAY]）。
+ * 路由由 [AppDestination.statsItemDetailRoute] 拼装（stats 既有路径拼装 + framework 补的可选
+ * epochDay 查询串），解析侧同样走 stats 既有 [StatsDestination.epochDayOf]（经 [statsEpochDayArg]）。
+ *
+ * @param epochDay 盘点页正在展示的自然日；缺省「今天」哨兵 = 页面按会话时区解析为「今天」
+ */
+private fun NavHostController.toStatsItemDetail(
+    studentId: Long,
+    homeworkId: Long,
+    epochDay: Long = StatsDestination.ARG_EPOCH_DAY_TODAY,
+) {
+    navigate(AppDestination.statsItemDetailRoute(studentId, homeworkId, epochDay))
 }
 
 /**

@@ -78,6 +78,28 @@ object TimerConstants {
     /** WakeLock 超时兜底（毫秒），与 [WAKE_LOCK_TIMEOUT_HOURS] 同源 */
     const val WAKE_LOCK_TIMEOUT_MILLIS = WAKE_LOCK_TIMEOUT_HOURS * MILLIS_PER_HOUR
 
+    // ---- 业务自然日（逐日归属） ----
+    /**
+     * 未指定业务自然日的哨兵值。
+     *
+     * 语义：仅用于「v4 旧库经 ALTER TABLE 加列后遗留的 epoch_day 列默认值 0」这一历史数据；
+     * 正常写入路径（开始计时）必须显式写入按业务时区折算的真实自然日。
+     * 取值 0 对应 1970-01-01，不可能是真实作业日，故可安全用作哨兵。
+     */
+    const val UNSPECIFIED_EPOCH_DAY = 0L
+
+    // ---- 阶段作业每日到点提醒 ----
+    /**
+     * 「按天提醒」的闹钟请求码基数。
+     *
+     * 与单次提醒的 [ALARM_REQUEST_CODE_BASE] 错开一个量级：阶段作业的每一天各有一个闹钟，
+     * 若与单次提醒共用同一区间，就可能与**另一条作业**的单次提醒撞码而互相覆盖。
+     */
+    const val ALARM_REQUEST_CODE_DAY_BASE = 500_000
+
+    /** 「作业 id + 自然日」混合为请求码时的乘数（同一对始终映射同一请求码，重设即覆盖） */
+    const val ALARM_REQUEST_CODE_DAY_MIX = 31L
+
     // ---- 休息页重建 ----
     /**
      * 休息起点复用窗口（毫秒）：进程被回收后重新进入休息页时，只有「起点仍在休息窗口内」

@@ -318,6 +318,7 @@ class TimerVoicePromptFlowTest {
         overduePromptStore = env.overduePromptStore,
         permissionChecker = env.permissionChecker,
         clock = env.clock,
+        zoneId = TimerTestEnv.ZONE,
     )
 
     /** 走秒服务替身（本套用例只关心语音与提醒，不校验服务调用序列） */

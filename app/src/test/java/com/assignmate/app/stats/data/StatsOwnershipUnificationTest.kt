@@ -3,7 +3,7 @@ package com.assignmate.app.stats.data
 import com.assignmate.app.auth.data.AuthRepository
 import com.assignmate.app.auth.domain.Role
 import com.assignmate.app.auth.domain.SessionState
-import com.assignmate.app.homework.domain.HomeworkStatus
+import com.assignmate.app.core.domain.homework.HomeworkDayStatus
 import com.assignmate.app.stats.domain.HistoryQuery
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.test.runTest
@@ -23,7 +23,7 @@ import org.junit.Test
  * 3. `itemDetail` 的「作业归属 == 会话唯一可见学生」校验在统一口径下仍成立（多学生家长不追加该校验）；
  * 4. 归属链路不再用 runCatching 吞掉协程取消：取消信号向上传播，不降级为 ACCESS_DENIED。
  *
- * 时钟/时区口径与 [StatsRepositoryTestEnv] 一致（2023-11-14 00:09 +08:00 / Asia/Shanghai）。
+ * 数据口径与 [StatsRepositoryTestEnv] 一致：每天详情的业务自然日为 2023-11-14（[StatsRepositoryTestEnv.DAY_EPOCH]）。
  */
 class StatsOwnershipUnificationTest {
 
@@ -68,7 +68,7 @@ class StatsOwnershipUnificationTest {
         val denied = listOf(
             env.repository.summarizeDay(StatsRepositoryTestEnv.OTHER_STUDENT_ID, dayEpoch),
             env.repository.history(StatsRepositoryTestEnv.OTHER_STUDENT_ID, HistoryQuery(dayEpoch)),
-            env.repository.itemDetail(1L),
+            env.repository.itemDetail(1L, dayEpoch),
         )
 
         denied.forEach { assertEquals(StatsFailure.ACCESS_DENIED, (it as StatsResult.Failure).reason) }
@@ -89,7 +89,14 @@ class StatsOwnershipUnificationTest {
             name = "小刚",
         )
         env.homeworkRepository.put(
-            statsTestHomework(1L, studentId = SIBLING_STUDENT_ID, status = HomeworkStatus.COMPLETED),
+            statsTestHomework(1L, studentId = SIBLING_STUDENT_ID),
+        )
+        env.dailyRecordRepository.put(
+            statsTestDayRecord(
+                homeworkId = 1L,
+                studentId = SIBLING_STUDENT_ID,
+                status = HomeworkDayStatus.COMPLETED,
+            ),
         )
 
         // auth 侧「同家长名下」成立，但学生会话只能看本人（归属能力不改变学生会话语义）
@@ -106,7 +113,7 @@ class StatsOwnershipUnificationTest {
         )
         assertEquals(
             StatsFailure.ACCESS_DENIED,
-            (env.repository.itemDetail(1L) as StatsResult.Failure).reason,
+            (env.repository.itemDetail(1L, dayEpoch) as StatsResult.Failure).reason,
         )
     }
 
@@ -131,19 +138,18 @@ class StatsOwnershipUnificationTest {
             name = "小刚",
         )
         env.homeworkRepository.put(
-            statsTestHomework(1L, studentId = SIBLING_STUDENT_ID, status = HomeworkStatus.COMPLETED),
+            statsTestHomework(1L, studentId = SIBLING_STUDENT_ID),
         )
-        env.timerRepository.putSession(
-            statsTestSession(
-                sessionId = 10L,
+        env.dailyRecordRepository.put(
+            statsTestDayRecord(
                 homeworkId = 1L,
-                startedAtMillis = StatsRepositoryTestEnv.at(0),
-                finishedAtMillis = StatsRepositoryTestEnv.at(10),
                 studentId = SIBLING_STUDENT_ID,
+                status = HomeworkDayStatus.COMPLETED,
+                actualMinutes = 10,
             ),
         )
 
-        val detail = (env.repository.itemDetail(1L) as StatsResult.Success).data
+        val detail = (env.repository.itemDetail(1L, dayEpoch) as StatsResult.Success).data
 
         assertEquals(2, env.authRepository.ownedStudentIds(StatsRepositoryTestEnv.PARENT_ID).size)
         assertEquals(SIBLING_STUDENT_ID, detail.studentId)
@@ -169,7 +175,7 @@ class StatsOwnershipUnificationTest {
     @Test
     fun `会话可见学生解析遇协程取消时详情不降级为越权拒绝`() {
         val homeworkRepository = FakeStatsHomeworkRepository().apply {
-            put(statsTestHomework(1L, status = HomeworkStatus.COMPLETED))
+            put(statsTestHomework(1L))
         }
         // 直接构造替身（不经测试环境）时需自行登记档案：家长对作业归属学生的归属须先成立，才走到可见学生解析
         val delegate = FakeStatsAuthRepository(parentSession()).apply {
@@ -190,7 +196,7 @@ class StatsOwnershipUnificationTest {
         // 归属校验经 isStudentOwnedBy 通过后，唯一可见学生解析（ownedStudentIds）同样不得吞掉取消
         assertEquals(
             CancellingAuthRepository.OWNED_STUDENT_IDS_MESSAGE,
-            runAndCaptureCancellation { repository.itemDetail(1L) },
+            runAndCaptureCancellation { repository.itemDetail(1L, dayEpoch) },
         )
     }
 
@@ -198,10 +204,10 @@ class StatsOwnershipUnificationTest {
     private fun repositoryWith(
         authRepository: AuthRepository,
         homeworkRepository: FakeStatsHomeworkRepository = FakeStatsHomeworkRepository(),
-        timerRepository: FakeStatsTimerRepository = FakeStatsTimerRepository(),
+        dailyRecordRepository: FakeStatsDailyRecordRepository = FakeStatsDailyRecordRepository(),
     ): StatsRepository = StatsRepositoryImpl(
         homeworkRepository = homeworkRepository,
-        timerRepository = timerRepository,
+        dailyRecordRepository = dailyRecordRepository,
         authRepository = authRepository,
         clock = StatsMutableClock(StatsRepositoryTestEnv.FIXED_MILLIS),
         zoneId = StatsRepositoryTestEnv.ZONE,

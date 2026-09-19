@@ -25,8 +25,10 @@ import kotlinx.coroutines.launch
 /**
  * 历史查询页 ViewModel：按日期（或日期范围）查看历史完成情况（学生/家长视角均可查看名下学生）。
  *
- * 数据来源：[StatsRepository.history]（逐日盘点，按日期倒序；单日与范围口径同源，均走
- * [StatsCalculations.summarizeDay]）。
+ * 数据来源：[StatsRepository.history]（按天聚合**作业每天详情**，逐日盘点，按日期倒序；
+ * 单日与范围口径同源，均走 [StatsCalculations.summarizeDay]）。阶段作业在**覆盖期内每一天都应做**
+ * （由覆盖范围推导，见 [StatsCalculations.shouldDoOn]；每天详情是按需写入的，不逐日预建），
+ * 因此其覆盖期内每一天都会出现在历史里，行内同时体现「当日是否完成」与「阶段打卡进度」。
  *
  * 状态流转（单数据流 [uiState] + 一次性事件 [events]）：
  * 1. 初始 [HistoryPhase.LOADING]；
@@ -243,6 +245,17 @@ data class HistoryRow(
     /** 暂停情况文案（如「暂停 2 次 · 12 分钟」） */
     val pauseText: String
         get() = "暂停 ${summary.pauseCount} 次 · ${StatsCalculations.durationText(summary.pausedTotalMillis)}"
+
+    /**
+     * 阶段打卡进度文案（当天涉及的阶段作业；当天无阶段作业时为 null）。
+     *
+     * 阶段作业只有一条作业项，作业项状态无法表达「某一天做没做」，
+     * 因此历史行同时给出「当日完成情况」（[progressText]）与整段「打卡进度」。
+     */
+    val stageText: String?
+        get() = summary.stages
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString("，") { stage -> "「${stage.content}」${StatsErrorMessages.stageProgressText(stage)}" }
 }
 
 /**

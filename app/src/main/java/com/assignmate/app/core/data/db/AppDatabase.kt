@@ -3,12 +3,14 @@ package com.assignmate.app.core.data.db
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
+import com.assignmate.app.core.data.db.dao.HomeworkDailyRecordDao
 import com.assignmate.app.core.data.db.dao.HomeworkItemDao
 import com.assignmate.app.core.data.db.dao.OcrRetryTaskDao
 import com.assignmate.app.core.data.db.dao.ParentAccountDao
 import com.assignmate.app.core.data.db.dao.PauseRecordDao
 import com.assignmate.app.core.data.db.dao.StudentDao
 import com.assignmate.app.core.data.db.dao.TimerSessionDao
+import com.assignmate.app.core.data.db.entity.HomeworkDailyRecordEntity
 import com.assignmate.app.core.data.db.entity.HomeworkItemEntity
 import com.assignmate.app.core.data.db.entity.OcrRetryTaskEntity
 import com.assignmate.app.core.data.db.entity.ParentAccountEntity
@@ -36,6 +38,7 @@ import com.assignmate.app.core.domain.util.CoreConstants
         HomeworkItemEntity::class,
         TimerSessionEntity::class,
         PauseRecordEntity::class,
+        HomeworkDailyRecordEntity::class,
     ],
     version = CoreConstants.DATABASE_VERSION,
     exportSchema = true,
@@ -60,4 +63,7 @@ abstract class AppDatabase : RoomDatabase() {
 
     /** 暂停明细 DAO（timer/stats 模块使用） */
     abstract fun pauseRecordDao(): PauseRecordDao
+
+    /** 作业每天详情 DAO（homework/timer/stats 模块使用） */
+    abstract fun homeworkDailyRecordDao(): HomeworkDailyRecordDao
 }

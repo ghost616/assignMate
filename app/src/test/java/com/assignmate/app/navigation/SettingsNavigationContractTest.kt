@@ -1,4 +1,4 @@
-﻿package com.assignmate.app.navigation
+package com.assignmate.app.navigation
 
 import com.assignmate.app.auth.ui.AuthDestination
 import com.assignmate.app.homework.ui.HomeworkDestination
@@ -204,7 +204,8 @@ class SettingsNavigationContractTest {
             "timer/next/{studentId}",
             "timer/completion/{studentId}",
             "stats/day/{studentId}?epochDay={epochDay}",
-            "stats/item/{studentId}/{homeworkId}",
+            // 单项详情：stats 侧常量为纯路径，宿主在注册模板上补可选 epochDay 查询参数
+            "stats/item/{studentId}/{homeworkId}?epochDay={epochDay}",
             "stats/history/{studentId}?fromEpochDay={fromEpochDay}&toEpochDay={toEpochDay}",
             SettingsDestination.HOME,
             SettingsDestination.OCR_CONFIG,
@@ -291,6 +292,7 @@ class SettingsNavigationContractTest {
         "TimerDestination.COMPLETION" -> "timer/completion/{studentId}"
         "StatsDestination.DAY_SUMMARY" -> "stats/day/{studentId}?epochDay={epochDay}"
         "StatsDestination.ITEM_DETAIL" -> "stats/item/{studentId}/{homeworkId}"
+        "AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY" -> AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY
         "StatsDestination.HISTORY" ->
             "stats/history/{studentId}?fromEpochDay={fromEpochDay}&toEpochDay={toEpochDay}"
         "SettingsDestination.HOME" -> SettingsDestination.HOME

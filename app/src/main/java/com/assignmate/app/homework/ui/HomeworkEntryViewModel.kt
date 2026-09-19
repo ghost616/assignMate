@@ -10,9 +10,11 @@ import com.assignmate.app.homework.data.HomeworkFileStore
 import com.assignmate.app.homework.data.HomeworkRepository
 import com.assignmate.app.homework.domain.CreatorRole
 import com.assignmate.app.homework.domain.HomeworkConstants
+import com.assignmate.app.homework.domain.HomeworkDailyDeadlineCodec
 import com.assignmate.app.homework.domain.HomeworkItem
 import com.assignmate.app.homework.domain.HomeworkTemplate
 import com.assignmate.app.homework.domain.HomeworkType
+import com.assignmate.app.homework.domain.HomeworkValidationError
 import com.assignmate.app.homework.domain.HomeworkValidators
 import com.assignmate.app.homework.domain.StageRange
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -303,8 +305,12 @@ class HomeworkEntryViewModel @Inject constructor(
             return
         }
         val deadlineInstant = (deadline as? DeadlineParse.Parsed)?.instant
+        // 阶段作业的每日截止时刻**只有家长录入时必填**（学生录入可留空）——与仓库
+        // HomeworkValidators.validateTemplate 同一口径，文案亦复用同一映射点
         if (state.type == HomeworkType.STAGE && creatorRole == CreatorRole.PARENT && deadlineInstant == null) {
-            _uiState.update { it.copy(deadlineError = "家长录入的阶段作业需要设置截止时间") }
+            _uiState.update {
+                it.copy(deadlineError = HomeworkValidationError.MISSING_STAGE_DEADLINE.toUserMessage())
+            }
             return
         }
         val template = HomeworkTemplate(
@@ -321,8 +327,13 @@ class HomeworkEntryViewModel @Inject constructor(
             val result = homeworkRepository.addHomework(template, studentId)
             _uiState.update { it.copy(submitting = false) }
             when (result) {
+                // 保存成功事件携带**新建作业项的真实 id**（阶段作业与当天作业都恰好产出 1 条）：
+                // framework 据此对「新建作业」按 id 精确同步逐日提醒，不必再退化为整份清单纠正兜底
                 is AddHomeworkResult.Success -> _events.send(
-                    HomeworkEntryEvent.Saved("已添加 ${result.items.size} 项作业"),
+                    HomeworkEntryEvent.Saved(
+                        message = "已添加 ${result.items.size} 项作业",
+                        homeworkId = result.items.firstOrNull()?.id ?: HomeworkConstants.INVALID_ID,
+                    ),
                 )
 
                 is AddHomeworkResult.TemplateInvalid ->
@@ -441,23 +452,36 @@ class HomeworkEntryViewModel @Inject constructor(
     /** 当前会话角色（唯一口径：会话初始化时写入的 [HomeworkEntryUiState.role]，不另立来源） */
     private fun currentRole(): Role? = _uiState.value.role
 
+    /**
+     * 解析截止时间输入（**按作业类型分两种语义**）：
+     * - 阶段作业（STAGE）：**只填时刻**（time-of-day，如 21:00）——「阶段范围内每天到这个时刻截止」；
+     *   留空时返回无截止（是否必填由 [onSubmit] 按**录入者角色**判定：家长录入必填、学生录入可留空，
+     *   与仓库 [HomeworkValidators.validateTemplate] 同源，避免「UI 先拦、仓库本会放行」的口径分叉）；
+     * - 当天作业（TODAY）：沿用「日期 + 时刻」的绝对 deadline 语义。
+     */
     private fun resolveDeadline(state: HomeworkEntryUiState): DeadlineParse {
         val dateText = state.deadlineDate.trim()
         val timeText = state.deadlineTime.trim()
-        if (dateText.isEmpty() && timeText.isEmpty()) {
-            return DeadlineParse.Parsed(null)
+        if (timeText.isEmpty()) {
+            return if (state.type == HomeworkType.STAGE) {
+                DeadlineParse.Parsed(null)
+            } else if (dateText.isEmpty()) {
+                DeadlineParse.Parsed(null)
+            } else {
+                DeadlineParse.Failed("请填写截止时刻，例如 21:00")
+            }
+        }
+        val time = runCatching { LocalTime.parse(timeText, TIME_FORMAT) }.getOrNull()
+            ?: return DeadlineParse.Failed("截止时刻格式应为 HH:mm")
+        if (state.type == HomeworkType.STAGE) {
+            // 阶段作业：只取时刻，日期不参与（每日到点截止）
+            return DeadlineParse.Parsed(HomeworkDailyDeadlineCodec.timeOfDayCarrier(time))
         }
         if (dateText.isEmpty()) {
             return DeadlineParse.Failed("请填写截止日期，例如 2025-01-02")
         }
         val date = runCatching { LocalDate.parse(dateText, DATE_FORMAT) }.getOrNull()
             ?: return DeadlineParse.Failed("截止日期格式应为 yyyy-MM-dd")
-        val time = if (timeText.isEmpty()) {
-            LocalTime.of(DEFAULT_DEADLINE_HOUR, 0)
-        } else {
-            runCatching { LocalTime.parse(timeText, TIME_FORMAT) }.getOrNull()
-                ?: return DeadlineParse.Failed("截止时间格式应为 HH:mm")
-        }
         return DeadlineParse.Parsed(date.atTime(time).atZone(zoneId).toInstant())
     }
 
@@ -474,9 +498,6 @@ class HomeworkEntryViewModel @Inject constructor(
     }
 
     private companion object {
-
-        /** 未填截止时刻时的默认时刻 */
-        const val DEFAULT_DEADLINE_HOUR = 21
 
         val DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
         val TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
@@ -536,7 +557,14 @@ data class HomeworkEntryUiState(
     /** 截止时间是否可编辑（仅家长） */
     val deadlineEditable: Boolean get() = role == Role.PARENT
 
-    /** 预计覆盖的最后一天 */
+    /**
+     * 本次录入的**录入者角色**（由会话角色推导，与 [HomeworkEntryViewModel.onSubmit] 构造
+     * [HomeworkTemplate.creatorRole] 的口径同源）：供页面取「阶段每日截止时刻」提示文案
+     * （[stageDailyDeadlineHint]）用，避免 UI 侧重复硬编码同一句话。
+     */
+    val ownerRole: CreatorRole? get() = role?.let(CreatorRole::fromSessionRole)
+
+    /** 阶段覆盖的最后一天（阶段作业按所选范围推算，便于页面提示「覆盖至 X 月 X 日」） */
     val lastEpochDay: Long get() = stageRange?.lastEpochDay(todayEpochDay) ?: todayEpochDay
 
     /** 是否有内容可保存（学生允许留空） */
@@ -549,8 +577,15 @@ sealed interface HomeworkEntryEvent {
     /** 请求 UI 启动相机拍摄（携带临时文件路径） */
     data class LaunchCamera(val outputPath: String) : HomeworkEntryEvent
 
-    /** 保存成功：返回清单页 */
-    data class Saved(val message: String) : HomeworkEntryEvent
+    /**
+     * 保存成功：返回清单页。
+     *
+     * [homeworkId] 是本次新建作业项的**真实 id**（阶段作业即那一条作业项的 id），供 framework
+     * 对「新建作业」按 id 精确同步逐日提醒；仅当仓库返回的作业项为空（领域上不会发生：
+     * [HomeworkTemplate.toItems] 恒定产出 1 条）时退化为 [HomeworkConstants.INVALID_ID]，
+     * 消费方按「非正数 = 拿不到 id、不可精确同步」处理。
+     */
+    data class Saved(val message: String, val homeworkId: Long) : HomeworkEntryEvent
 
     /** 一次性提示 */
     data class ShowMessage(val message: String) : HomeworkEntryEvent

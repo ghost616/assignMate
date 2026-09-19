@@ -343,6 +343,7 @@ class StatsReturnStackContractTest {
     private fun routeConstantValue(expression: String): String? = when (expression) {
         "StatsDestination.DAY_SUMMARY" -> StatsDestination.DAY_SUMMARY
         "StatsDestination.ITEM_DETAIL" -> StatsDestination.ITEM_DETAIL
+        "AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY" -> AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY
         "StatsDestination.HISTORY" -> StatsDestination.HISTORY
         "HomeworkDestination.LIST" -> HomeworkDestination.LIST
         else -> null

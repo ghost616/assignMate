@@ -1,5 +1,7 @@
 package com.assignmate.app.di
 
+import com.assignmate.app.navigation.AndroidReminderSyncLogSink
+import com.assignmate.app.navigation.ReminderSyncLogSink
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -27,7 +29,7 @@ import kotlinx.coroutines.SupervisorJob
 annotation class ApplicationScope
 
 /**
- * framework 提供的进程级协程作用域（Hilt 单例）。
+ * framework 提供的进程级协程作用域（Hilt 单例）+ 框架层日志出口绑定。
  *
  * 采用 [SupervisorJob]：单个收尾任务失败不影响其它任务；调度器用 [Dispatchers.Default]
  * （任务本质是系统调用/IO，Android 上 Default 与 IO 均可用，统一走 Default 便于测试替换）。
@@ -40,4 +42,14 @@ object ApplicationScopeModule {
     @Singleton
     @ApplicationScope
     fun provideApplicationScope(): CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /**
+     * 提醒同步接线层的日志出口（生产实现走 android.util.Log.d）。
+     *
+     * 单测注入替身出口断言「静默分支确实留痕」；生产由本绑定提供，
+     * 保证「静默 no-op 不再无痕」这条可观测性契约不会因漏配绑定而被绕过。
+     */
+    @Provides
+    @Singleton
+    fun provideReminderSyncLogSink(): ReminderSyncLogSink = AndroidReminderSyncLogSink
 }

@@ -151,6 +151,22 @@ class ReminderSyncDispatcherTest {
             delegate.cancel(homeworkId)
         }
 
+        /**
+         * 按天调度方法与单次方法一样**显式委派**（接口已把它们改为抽象方法，见 #8-2 防静默退化）：
+         * 本替身只关心接线层语义，逐日记录交由 [FakeAlarmScheduler] 承担。
+         */
+        override fun scheduleDaily(
+            homeworkId: Long,
+            epochDay: Long,
+            content: String,
+            triggerAtMillis: Long,
+        ): AlarmScheduleResult =
+            delegate.scheduleDaily(homeworkId, epochDay, content, triggerAtMillis)
+
+        override fun cancelDaily(homeworkId: Long, epochDay: Long) {
+            delegate.cancelDaily(homeworkId, epochDay)
+        }
+
         /** 某作业最近一次设置的触发时刻（未设置过返回 null） */
         fun lastTriggerOf(homeworkId: Long): Long? =
             scheduled.lastOrNull { it.first == homeworkId }?.third
@@ -164,7 +180,7 @@ class ReminderSyncDispatcherTest {
     private fun TestScope.fixture(scheduler: HomeworkAlarmScheduler = RecordingAlarmScheduler()): Fixture {
         val repository = FakeHomeworkRepository()
         val clock = MutableClock(BASE)
-        val coordinator = HomeworkReminderCoordinator(repository, scheduler, clock)
+        val coordinator = HomeworkReminderCoordinator(repository, scheduler, clock, TimerTestEnv.ZONE)
         val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
         return Fixture(
             repository = repository,

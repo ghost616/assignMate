@@ -51,6 +51,16 @@ object HomeworkReminderDeliveryRules {
         body = "去作业清单看看这一项，准备好就开始计时吧！",
     )
 
+    /**
+     * 该投递动作是否应当触发「调度状态清理」（取消该次闹钟，不留可再次触发的残留）。
+     *
+     * 只在 [ReminderDelivery.Silent]（核对明确判定失效）时为真：
+     * - 阶段范围缩短/类型切回 TODAY/作业被删后，旧区间内的每日闹钟可能因「同步没跑到」而残留并触发，
+     *   投递侧按库内事实确认失效后顺手精确取消该天，避免用户在后续日子被反复打扰；
+     * - [ReminderDelivery.Neutral]（核对不可用）**不清理**：无法确认失效时不做破坏性动作。
+     */
+    fun requiresCleanup(delivery: ReminderDelivery): Boolean = delivery is ReminderDelivery.Silent
+
     /** 由核对结果推导投递动作 */
     fun decide(verification: ReminderVerification): ReminderDelivery = when (verification) {
         is ReminderVerification.ConfirmedPending -> ReminderDelivery.Named(verification.content)

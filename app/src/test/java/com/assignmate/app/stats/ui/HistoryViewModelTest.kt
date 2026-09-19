@@ -8,6 +8,7 @@ import com.assignmate.app.stats.data.StatsResult
 import com.assignmate.app.stats.domain.HistoryQuery
 import com.assignmate.app.stats.domain.StatsCalculations
 import com.assignmate.app.stats.domain.StatsConstants
+import com.assignmate.app.stats.domain.StageProgress
 import java.time.ZoneId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -99,6 +100,35 @@ class HistoryViewModelTest {
         assertEquals("2023-11-14", row.dateText)
         assertEquals("已完成 1 / 2 项（50.0%）", row.progressText)
         assertEquals("暂停 1 次 · 2 分钟", row.pauseText)
+        // 当天没有阶段作业：不渲染打卡进度行
+        assertNull(row.stageText)
+    }
+
+    @Test
+    fun `逐日条目展示当天阶段作业的打卡进度`() = runTest {
+        val stats = FakeStatsRepository().apply {
+            historyResult = StatsResult.Success(
+                listOf(
+                    daySummary(
+                        epochDay = DAY_EPOCH,
+                        stages = listOf(
+                            StageProgress(homeworkId = 1L, content = "背单词", doneDays = 3, totalDays = 7),
+                            StageProgress(homeworkId = 2L, content = "练字", doneDays = 7, totalDays = 7),
+                        ),
+                    ),
+                ),
+            )
+        }
+        val viewModel = track(historyViewModel(stats))
+        viewModel.start(StatsDestination.ARG_STUDENT_ID_NONE, DAY_EPOCH, DAY_EPOCH)
+
+        // 阶段作业只有一条作业项，作业项状态无法表达「某一天做没做」：
+        // 历史行同时给出「当日完成情况」与该行涉及的阶段打卡进度
+        assertEquals(
+            "「背单词」阶段打卡 3/7 天，「练字」阶段打卡 7/7 天",
+            viewModel.uiState.value.rows.single().stageText,
+        )
+        assertEquals("已完成 1 / 2 项（50.0%）", viewModel.uiState.value.rows.single().progressText)
     }
 
     @Test

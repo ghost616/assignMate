@@ -1,9 +1,9 @@
 package com.assignmate.app.stats.domain
 
-import com.assignmate.app.homework.domain.HomeworkStatus
+import com.assignmate.app.core.domain.homework.HomeworkDayStatus
 
 /**
- * 困难度评估等级：依据「完成状态 + 实际耗时/预估耗时比值 + 暂停次数」给出的**侧面评估**，
+ * 困难度评估等级：依据「当天完成状态 + 实际耗时/预估耗时比值 + 暂停次数」给出的**侧面评估**，
  * 用于提示家长/学生「这项作业可能比较吃力」，不作为作业状态的判定依据。
  *
  * 等级语义：
@@ -11,7 +11,7 @@ import com.assignmate.app.homework.domain.HomeworkStatus
  * - [NORMAL] 正常：耗时与预估相当；
  * - [SLOW] 偏慢：比预估慢较多，或暂停多次；
  * - [CHALLENGING] 明显吃力：比预估慢很多，或频繁暂停；
- * - [UNKNOWN] 暂无数据：尚无执行记录，无法评估。
+ * - [UNKNOWN] 暂无数据：当天没有执行痕迹，无法评估。
  */
 enum class DifficultyLevel {
 
@@ -27,7 +27,7 @@ enum class DifficultyLevel {
     /** 明显吃力 */
     CHALLENGING,
 
-    /** 暂无数据（无执行记录） */
+    /** 暂无数据（当天无执行痕迹） */
     UNKNOWN,
     ;
 
@@ -48,9 +48,10 @@ enum class DifficultyLevel {
 /**
  * 困难度评估规则（纯函数，集中可单测）。
  *
- * 评估口径（[StatsConstants] 中的阈值同源）：
- * 1. 无执行会话（[sessionCount] == 0）→ [DifficultyLevel.UNKNOWN]：没有耗时数据可比，
- *    不臆测困难度（页面展示「尚未开始 / 暂无数据」）；
+ * 评估口径（[StatsConstants] 中的阈值同源）。注意口径为**按天**：完成状态取作业每天详情里
+ * 这一天的状态（阶段作业的每一天各自评估），时长与暂停同样取当天值：
+ * 1. 当天没有执行痕迹（[hasExecution] 为 false）→ [DifficultyLevel.UNKNOWN]：没有耗时数据可比，
+ *    不臆测困难度（页面展示「尚未开始 / 暂无数据」）；「缺卡未做」同样不臆测；
  * 2. 频繁暂停（暂停次数 ≥ [StatsConstants.VERY_FREQUENT_PAUSE_COUNT]）→ [DifficultyLevel.CHALLENGING]，
  *    暂停次数本身就是「频繁走开」的强信号，与耗时长短无关；
  * 3. 耗时比值（实际 / 预估）：
@@ -60,30 +61,30 @@ enum class DifficultyLevel {
  *      [StatsConstants.FREQUENT_PAUSE_COUNT] 时降级为 [DifficultyLevel.SLOW]，快但常被打断）；
  *    - 其余 → [DifficultyLevel.NORMAL]；
  * 4. 预估时长缺失时比值不可用：改为「实际耗时 ≥ [StatsConstants.LONG_RUNNING_MINUTES] 分钟 → 偏慢」的兜底口径；
- * 5. 未完成的作业（进行中/待完成）至少不下结论为「很顺利」：耗时仍在增长，
+ * 5. 当天未完成的作业（进行中/未开始/缺卡）至少不下结论为「很顺利」：耗时仍在增长，
  *    按比值评估但把 [DifficultyLevel.SMOOTH] 降级为 [DifficultyLevel.NORMAL]。
  *
- * 所有方法均为纯函数：不读时钟、不访问数据库，时间口径由调用方传入。
+ * 所有方法均为纯函数：不读时钟、不访问数据库，数据由调用方传入。
  */
 object DifficultyAssessor {
 
     /**
      * 困难度等级评估。
      *
-     * @param status 作业当前状态（已完成才允许给出「很顺利」的正面结论）
-     * @param estimatedMinutes 预估时长（分钟），未排定时间为 null
-     * @param elapsedMillis 实际耗时（毫秒，已扣除暂停）
-     * @param pauseCount 暂停次数
-     * @param sessionCount 执行会话数（0 表示尚无执行记录）
+     * @param dayStatus 作业**当天**状态（只有当天已完成才允许给出「很顺利」的正面结论）
+     * @param estimatedMinutes 当天预估时长（分钟），未设定为 null
+     * @param elapsedMillis 当天实际耗时（毫秒，已扣除暂停）
+     * @param pauseCount 当天暂停次数
+     * @param hasExecution 当天是否有执行痕迹（false 表示尚无数据，不做评估）
      */
     fun assess(
-        status: HomeworkStatus,
+        dayStatus: HomeworkDayStatus,
         estimatedMinutes: Int?,
         elapsedMillis: Long,
         pauseCount: Int,
-        sessionCount: Int,
+        hasExecution: Boolean,
     ): DifficultyLevel {
-        if (sessionCount <= 0) {
+        if (!hasExecution) {
             return DifficultyLevel.UNKNOWN
         }
         if (pauseCount >= StatsConstants.VERY_FREQUENT_PAUSE_COUNT) {
@@ -98,8 +99,8 @@ object DifficultyAssessor {
             ratio <= StatsConstants.FAST_RATIO -> fastLevel(pauseCount)
             else -> DifficultyLevel.NORMAL
         }
-        // 未完成作业的耗时尚在增长，「很顺利」的结论暂不成立
-        if (level == DifficultyLevel.SMOOTH && !StatsCalculations.isCompleted(status)) {
+        // 当天未完成的作业耗时尚在增长，「很顺利」的结论暂不成立
+        if (level == DifficultyLevel.SMOOTH && !StatsCalculations.isDayCompleted(dayStatus)) {
             return DifficultyLevel.NORMAL
         }
         return level
@@ -108,14 +109,14 @@ object DifficultyAssessor {
     /**
      * 困难度可读提示（面向学生/家长的口语化文案）。
      *
-     * 无执行记录时返回「尚未开始」类提示而非困难度结论，避免空数据被误读为「很轻松」。
+     * 无执行痕迹时等级为 [DifficultyLevel.UNKNOWN]，返回「尚未开始」类提示而非困难度结论，
+     * 避免空数据被误读为「很轻松」。
      */
     fun hintOf(
         level: DifficultyLevel,
         estimatedMinutes: Int?,
         elapsedMillis: Long,
         pauseCount: Int,
-        sessionCount: Int,
     ): String = when (level) {
         DifficultyLevel.UNKNOWN -> HINT_NOT_STARTED
         DifficultyLevel.SMOOTH -> "比预估快一些，做得挺顺利的"
@@ -185,6 +186,6 @@ object DifficultyAssessor {
             "用时很长且反复暂停，可能比较吃力，建议拆小步骤完成"
     }
 
-    /** 无执行记录时的提示文案（页面「尚未开始/暂无数据」口径的唯一出口） */
+    /** 当天无执行痕迹时的提示文案（页面「尚未开始/暂无数据」口径的唯一出口） */
     const val HINT_NOT_STARTED = "还没有开始计时，暂时没有耗时数据"
 }

@@ -2,6 +2,7 @@ package com.assignmate.app.stats.data
 
 import com.assignmate.app.auth.domain.Role
 import com.assignmate.app.auth.domain.SessionState
+import com.assignmate.app.core.domain.homework.HomeworkDayStatus
 import com.assignmate.app.homework.domain.HomeworkStatus
 import com.assignmate.app.stats.domain.HistoryQuery
 import kotlinx.coroutines.test.runTest
@@ -11,13 +12,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 离朱补充边界探针（不改动被测代码，仅新增用例）：
- * 覆盖计划主用例未涉及的**边界与退化路径**——非正学生 id、家长会话缺失 parentId、
+ * 边界探针（不改动被测代码，仅新增用例）：
+ * 覆盖主用例未涉及的**边界与退化路径**——非正学生 id、家长会话缺失 parentId、
  * 未登记档案的学生、学生会话查看他人作业、入参与会话校验的优先级、
  * 归属通过后的数据读取异常收敛（不得吞异常、不得越权放行）。
  *
  * 复用模块既有测试替身 [StatsRepositoryTestEnv] / [FakeStatsAuthRepository] 等，
- * 时钟/时区口径与之一致（2023-11-14 00:09 +08:00 / Asia/Shanghai）。
+ * 数据口径与之一致：每天详情的业务自然日为 2023-11-14（[StatsRepositoryTestEnv.DAY_EPOCH]）。
  */
 class StatsOwnershipEdgeProbeTest {
 
@@ -79,7 +80,7 @@ class StatsOwnershipEdgeProbeTest {
         // 作业不存在：先取作业得到 HOMEWORK_NOT_FOUND，不因归属解析而崩溃
         assertEquals(
             StatsFailure.HOMEWORK_NOT_FOUND,
-            (env.repository.itemDetail(404L) as StatsResult.Failure).reason,
+            (env.repository.itemDetail(404L, dayEpoch) as StatsResult.Failure).reason,
         )
     }
 
@@ -89,25 +90,20 @@ class StatsOwnershipEdgeProbeTest {
     fun `学生会话查看他人作业详情被拒绝且不泄露数据`() = runTest {
         val env = StatsRepositoryTestEnv() // 会话学生 = STUDENT_ID
         env.homeworkRepository.put(
-            statsTestHomework(
-                id = 1L,
-                studentId = StatsRepositoryTestEnv.OTHER_STUDENT_ID,
-                status = HomeworkStatus.COMPLETED,
-            ),
+            statsTestHomework(id = 1L, studentId = StatsRepositoryTestEnv.OTHER_STUDENT_ID),
         )
-        env.timerRepository.putSession(
-            statsTestSession(
-                sessionId = 10L,
+        env.dailyRecordRepository.put(
+            statsTestDayRecord(
                 homeworkId = 1L,
-                startedAtMillis = StatsRepositoryTestEnv.at(0),
-                finishedAtMillis = StatsRepositoryTestEnv.at(10),
                 studentId = StatsRepositoryTestEnv.OTHER_STUDENT_ID,
+                status = HomeworkDayStatus.COMPLETED,
+                actualMinutes = 10,
             ),
         )
 
         assertEquals(
             StatsFailure.ACCESS_DENIED,
-            (env.repository.itemDetail(1L) as StatsResult.Failure).reason,
+            (env.repository.itemDetail(1L, dayEpoch) as StatsResult.Failure).reason,
         )
     }
 
@@ -121,7 +117,7 @@ class StatsOwnershipEdgeProbeTest {
             parentAccountId = StatsRepositoryTestEnv.PARENT_ID,
             name = "小刚",
         )
-        // 姐姐名下有一条当日完成作业；妹妹名下无任何数据
+        // 姐姐名下有一条当天完成作业（当天作业的完成口径取自作业状态列）；妹妹名下无任何数据
         env.homeworkRepository.put(
             statsTestHomework(
                 id = 1L,
@@ -129,13 +125,12 @@ class StatsOwnershipEdgeProbeTest {
                 status = HomeworkStatus.COMPLETED,
             ),
         )
-        env.timerRepository.putSession(
-            statsTestSession(
-                sessionId = 10L,
+        env.dailyRecordRepository.put(
+            statsTestDayRecord(
                 homeworkId = 1L,
-                startedAtMillis = StatsRepositoryTestEnv.at(0),
-                finishedAtMillis = StatsRepositoryTestEnv.at(10),
                 studentId = StatsRepositoryTestEnv.STUDENT_ID,
+                status = HomeworkDayStatus.COMPLETED,
+                actualMinutes = 10,
             ),
         )
 
@@ -143,10 +138,11 @@ class StatsOwnershipEdgeProbeTest {
             as StatsResult.Success).data
         val younger = (env.repository.summarizeDay(SIBLING_ID, dayEpoch) as StatsResult.Success).data
 
-        assertEquals(listOf(1L), elder.items.map { it.id })
-        assertEquals(StatsRepositoryTestEnv.STUDENT_ID, elder.items.single().studentId)
+        assertEquals(listOf(1L), elder.items.map { it.homeworkId })
+        // 姐姐名下这一项当天已完成；每日条目不携带学生维度（按显式入参取数），故只断言作业与状态
+        assertEquals(HomeworkDayStatus.COMPLETED, elder.items.single().status)
         assertTrue("妹妹名下无数据应返回空盘点（非失败）", younger.isEmpty)
-        assertEquals(emptyList<Long>(), younger.items.map { it.id })
+        assertEquals(emptyList<Long>(), younger.items.map { it.homeworkId })
         // 他人家长的学生仍被拒绝
         assertEquals(
             StatsFailure.ACCESS_DENIED,
@@ -155,14 +151,14 @@ class StatsOwnershipEdgeProbeTest {
         )
     }
 
-    // ---- 反向：读取异常收敛（汇总链路 READ_FAILED；详情链路见下方发现项） ----
+    // ---- 反向：读取异常收敛（汇总/历史链路 READ_FAILED；详情链路见下方发现项） ----
 
     @Test
     fun `归属校验通过后汇总链路读取异常收敛为读取失败而非越权`() = runTest {
         val env = parentEnv()
         env.homeworkRepository.put(statsTestHomework(1L, studentId = StatsRepositoryTestEnv.STUDENT_ID))
         env.homeworkRepository.failReads = true
-        env.timerRepository.failReads = true
+        env.dailyRecordRepository.failReads = true
 
         assertEquals(
             StatsFailure.READ_FAILED,
@@ -176,12 +172,11 @@ class StatsOwnershipEdgeProbeTest {
     }
 
     /**
-     * 离朱发现项（**非本次改造引入**，基线行为一致）：
+     * 已知信息项（**历史遗留，基线行为一致，本次改造逐字保留**）：
      * `itemDetail` 首个取数 `runCatching { homeworkRepository.getHomework(homeworkId) }.getOrNull()`
-     * 会把**读取异常**与**作业不存在**一并折叠成 `HOMEWORK_NOT_FOUND`（见 StatsRepositoryImpl 第 73-74 行，
-     * 与 `git show HEAD` 的改造前实现逐字相同）。即：详情入口在数据库读取异常时不返回
-     * [StatsFailure.READ_FAILED]，与计划「数据读取异常仍统一收敛为 READ_FAILED」的表述存在口径差异
-     * （汇总/历史链路的取数异常确实收敛为 READ_FAILED，已由上一个用例覆盖）。
+     * 会把**读取异常**与**作业不存在**一并折叠成 `HOMEWORK_NOT_FOUND`，
+     * 与「数据读取异常统一收敛为 READ_FAILED」的表述存在口径差异
+     * （每天详情读取异常确实收敛为 READ_FAILED，见 `每天详情读取失败时详情收敛为读取失败`）。
      *
      * 本用例按**实际行为**断言并固化现状，避免把既有口径当作本次改造的回归；
      * 若后续要求详情链路也区分「读取失败」，应同时修改实现与该用例。
@@ -194,7 +189,7 @@ class StatsOwnershipEdgeProbeTest {
 
         assertEquals(
             StatsFailure.HOMEWORK_NOT_FOUND,
-            (env.repository.itemDetail(1L) as StatsResult.Failure).reason,
+            (env.repository.itemDetail(1L, dayEpoch) as StatsResult.Failure).reason,
         )
     }
 
@@ -218,8 +213,8 @@ class StatsOwnershipEdgeProbeTest {
         env.homeworkRepository.put(
             statsTestHomework(1L, studentId = StatsRepositoryTestEnv.OTHER_STUDENT_ID),
         )
-        // 仅计时读取失败：作业读取正常，可确认越权判定未被取数异常掩盖
-        env.timerRepository.failReads = true
+        // 仅每天详情读取失败：作业读取正常，可确认越权判定未被取数异常掩盖
+        env.dailyRecordRepository.failReads = true
 
         // 他人学生：归属校验先失败，返回越权而非读取失败，也不泄露数据
         assertEquals(
@@ -235,16 +230,16 @@ class StatsOwnershipEdgeProbeTest {
     }
 
     @Test
-    fun `归属通过后计时读取失败在详情入口收敛为读取失败而非越权`() = runTest {
+    fun `归属通过后详情读取失败收敛为读取失败而非越权`() = runTest {
         val env = parentEnv()
         env.homeworkRepository.put(
             statsTestHomework(1L, studentId = StatsRepositoryTestEnv.STUDENT_ID),
         )
-        env.timerRepository.failReads = true
+        env.dailyRecordRepository.failReads = true
 
         assertEquals(
             StatsFailure.READ_FAILED,
-            (env.repository.itemDetail(1L) as StatsResult.Failure).reason,
+            (env.repository.itemDetail(1L, dayEpoch) as StatsResult.Failure).reason,
         )
     }
 
@@ -264,7 +259,7 @@ class StatsOwnershipEdgeProbeTest {
         )
         assertEquals(
             StatsFailure.NO_ACTIVE_SESSION,
-            (env.repository.itemDetail(1L) as StatsResult.Failure).reason,
+            (env.repository.itemDetail(1L, dayEpoch) as StatsResult.Failure).reason,
         )
     }
 

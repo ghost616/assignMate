@@ -27,10 +27,10 @@ class StatsNavigationContractExtraTest {
 
     private val composableBlocks: List<String> = splitComposableBlocks(navHostSource)
 
-    /** stats 路由模板 -> 源码中注册时使用的常量表达式 */
+    /** stats 路由模板 -> 源码中注册时使用的常量表达式（ITEM_DETAIL 为宿主补过 epochDay 的注册模板） */
     private val statsRoutes: Map<String, String> = linkedMapOf(
         StatsDestination.DAY_SUMMARY to "StatsDestination.DAY_SUMMARY",
-        StatsDestination.ITEM_DETAIL to "StatsDestination.ITEM_DETAIL",
+        AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY to "AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY",
         StatsDestination.HISTORY to "StatsDestination.HISTORY",
     )
 
@@ -39,7 +39,12 @@ class StatsNavigationContractExtraTest {
     @Test
     fun `stats 三条路由模板与接线说明一致`() {
         assertEquals("stats/day/{studentId}?epochDay={epochDay}", StatsDestination.DAY_SUMMARY)
+        // stats 侧常量保持「纯路径」不动；日期查询参数由宿主在注册模板上补（见下一条断言）
         assertEquals("stats/item/{studentId}/{homeworkId}", StatsDestination.ITEM_DETAIL)
+        assertEquals(
+            "stats/item/{studentId}/{homeworkId}?epochDay={epochDay}",
+            AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY,
+        )
         assertEquals(
             "stats/history/{studentId}?fromEpochDay={fromEpochDay}&toEpochDay={toEpochDay}",
             StatsDestination.HISTORY,
@@ -107,6 +112,23 @@ class StatsNavigationContractExtraTest {
         assertEquals("epochDay 应声明「今天」哨兵默认值（可选查询参数）", 1, defaultCount)
         assertTrue(
             "盘点页应把解析出的日期传给页面",
+            block.contains("epochDay = entry.statsEpochDayArg(StatsDestination.ARG_EPOCH_DAY)"),
+        )
+    }
+
+    @Test
+    fun `单项详情路由的日期参数为可选且缺省为今天哨兵`() {
+        val block = blockForStatsRoute(
+            AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY,
+            "AppDestination.STATS_ITEM_DETAIL_WITH_EPOCH_DAY",
+        )
+        val defaultCount = Regex(
+            "defaultValue = StatsDestination\\.ARG_EPOCH_DAY_TODAY\\.toString\\(\\)",
+        ).findAll(block).count()
+
+        assertEquals("epochDay 应声明「今天」哨兵默认值（可选查询参数，既有不带查询串的深链接仍可命中）", 1, defaultCount)
+        assertTrue(
+            "详情页应把解析出的日期传给页面",
             block.contains("epochDay = entry.statsEpochDayArg(StatsDestination.ARG_EPOCH_DAY)"),
         )
     }

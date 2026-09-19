@@ -40,7 +40,12 @@ class HomeworkTimeSetViewModel @Inject constructor(
     private val homeworkRepository: HomeworkRepository,
     private val authRepository: AuthRepository,
     private val clock: Clock,
-    private val zoneId: ZoneId,
+    /**
+     * 业务时区：由 core 的**唯一**业务时区绑定注入（homework 不自建绑定），
+     * 既是「今天」与时刻解析的唯一口径，也经 [zoneId] 暴露给页面做展示格式化，
+     * 避免 Compose 侧再以 `ZoneId.systemDefault()` 兜底造成覆写绑定后口径漂移。
+     */
+    val zoneId: ZoneId,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(HomeworkTimeSetUiState())
@@ -148,11 +153,15 @@ class HomeworkTimeSetViewModel @Inject constructor(
             return
         }
         val estimated = minutes ?: return
-        // 本地预校验：deadline 约束（时间段冲突由仓库查库兜底）
-        val deadlineCheck = HomeworkValidators.validateDeadline(
+        // 本地预校验：截止约束**按作业类型分流**（与仓库 updateSchedule 同源，经 HomeworkValidators 单一入口）——
+        // 当天作业按绝对 deadline；阶段作业按「开始时刻所在自然日的每日截止时刻」
+        // （阶段作业的 deadline 只承载 time-of-day，若按绝对时刻解释会导致阶段作业永远提交不了）；
+        // 时间段冲突仍由仓库查库兜底
+        val deadlineCheck = HomeworkValidators.validateScheduleWithinItemDeadline(
+            item = item,
             startMillis = startInstant.toEpochMilli(),
             estimatedMinutes = estimated,
-            deadlineMillis = item.deadline?.toEpochMilli(),
+            zoneId = zoneId,
         )
         if (deadlineCheck is HomeworkValidation.Invalid) {
             _uiState.update { it.copy(timeError = deadlineCheck.error.toUserMessage()) }

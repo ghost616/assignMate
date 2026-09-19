@@ -6,9 +6,13 @@ import com.assignmate.app.auth.domain.SessionState
 import com.assignmate.app.core.data.db.dao.HomeworkItemDao
 import com.assignmate.app.core.data.db.dao.MovePositionOutcome
 import com.assignmate.app.core.data.db.entity.HomeworkItemEntity
+import com.assignmate.app.core.domain.homework.HomeworkDailyRecord
+import com.assignmate.app.core.domain.homework.HomeworkDailyRecordRepository
+import com.assignmate.app.core.domain.homework.HomeworkDayStatus
 import com.assignmate.app.core.domain.time.Clock
 import com.assignmate.app.homework.domain.CreatorRole
 import com.assignmate.app.homework.domain.HomeworkConstants
+import com.assignmate.app.homework.domain.HomeworkDailyDeadlineCodec
 import com.assignmate.app.homework.domain.HomeworkItem
 import com.assignmate.app.homework.domain.HomeworkStatus
 import com.assignmate.app.homework.domain.HomeworkTemplate
@@ -18,8 +22,10 @@ import com.assignmate.app.homework.domain.HomeworkValidation
 import com.assignmate.app.homework.domain.HomeworkValidationError
 import com.assignmate.app.homework.domain.HomeworkValidationException
 import com.assignmate.app.homework.domain.HomeworkValidators
+import com.assignmate.app.homework.domain.StageDayRecords
 import com.assignmate.app.homework.domain.StageRange
 import java.time.Instant
+import java.time.LocalTime
 import java.time.ZoneId
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -48,6 +54,26 @@ import kotlinx.coroutines.flow.map
  *   返回 LockedWorkInProgress 类结果且不改动数据）；「已完成」保持既有约束；
  * - 状态：新增为「已记录」；排定成功推进到「待完成」；其余流转按 [HomeworkStatus] 合法性校验；
  * - 时间来源统一取 [Clock]，便于测试注入固定时钟。
+ *
+ * ## 「完成」的两种语义（阶段作业：当天完成 ≠ 整条完成）
+ *
+ * 1. **当天作业（TODAY）**：完成即整条置 [HomeworkStatus.COMPLETED]，语义逐字不变。
+ * 2. **阶段作业（STAGE）**：[complete] 完成的是**今天**这一天的作业（落到每天详情），
+ *    **不**把整条作业项置为已完成；整条状态按每天进度收敛：
+ *    - 阶段覆盖日**全部完成** → 整条 [HomeworkStatus.COMPLETED]；
+ *    - 仍有未完成的天 → 回到 [HomeworkStatus.PENDING]（「整条还没走完」）——该状态在
+ *      timer 的可开始集合内（`STARTABLE_STATUSES = {PENDING, IN_PROGRESS}`），
+ *      因此**第二天可直接开始计时，不需要先「撤销完成」**，阶段范围内每一天都可开始；
+ *    - 阶段已结束但仍有未完成天：同样不得置 COMPLETED，整条停留在 PENDING，
+ *      由清单页按每天进度归入家长端「已结束」分组并标注未完成天数。
+ * 3. **[reopen] 与 [complete] 对称**：阶段作业撤销的是**今天**的完成记录（今天回到「未开始」），
+ *    整条随之回到 PENDING（今天可重新开始计时）。
+ * 4. 阶段窗口外（今天不在覆盖区间内，如阶段尚未开始或已结束）拒绝「完成今天」，
+ *    返回 [HomeworkStatusResult.IllegalTransition]，避免写入一条边界不明的每天详情。
+ *
+ * 之所以把「每天的完成」放在每天详情、整条状态只做进度收敛：用户需求是「阶段作业 1 条，
+ * 范围内每天都做、每天到点截止」——若按整条状态表达，第一天完成后整条即为「已完成」，
+ * 第二天既不能开始计时、还会被并行模块（提醒/统计）当成不需要再做的事。
  */
 @Singleton
 class HomeworkRepositoryImpl @Inject constructor(
@@ -56,6 +82,13 @@ class HomeworkRepositoryImpl @Inject constructor(
     private val clock: Clock,
     /** 时区口径：与 [com.assignmate.app.homework.di.HomeworkModule] 绑定的业务时区一致，供日期换算使用 */
     private val zoneId: ZoneId,
+    /**
+     * core 的「作业每天详情」仓库：负责把「开始 / 完成 / 撤销完成」落到每天详情，
+     * 并供清单页推导今日状态与阶段进度。默认 [NoopDailyRecordRepository] 为空实现
+     * （构造时传入业务时区，避免空实现内写死系统时区），保证仅依赖清单快照的既有测试替身零改动——
+     * 本模块**不直接访问 Room DAO**（core 持有表结构）。
+     */
+    private val dailyRecordRepository: HomeworkDailyRecordRepository = NoopDailyRecordRepository(zoneId),
 ) : HomeworkRepository {
 
     // ---- 查询 ----
@@ -68,6 +101,15 @@ class HomeworkRepositoryImpl @Inject constructor(
 
     override suspend fun getHomework(homeworkId: Long): HomeworkItem? =
         homeworkItemDao.findById(homeworkId)?.toDomain()
+
+    override suspend fun dailyRecordsOf(studentId: Long): Map<Long, List<HomeworkDailyRecord>> {
+        // 学生维度的全部天详情按（作业 id）聚合；阶段进度与今日状态据此推导
+        return homeworkItemDao.loadByStudent(studentId)
+            .associate { entity -> entity.id to dailyRecordRepository.loadByHomework(entity.id) }
+    }
+
+    override suspend fun dailyRecords(homeworkId: Long): List<HomeworkDailyRecord> =
+        dailyRecordRepository.loadByHomework(homeworkId)
 
     // ---- 录入 ----
 
@@ -90,7 +132,7 @@ class HomeworkRepositoryImpl @Inject constructor(
                     createdAt = now(),
                     firstPriority = firstPriority,
                 )
-                // 阶段作业最多 30 条：事务化写入，避免中途失败留下半套作业
+                // 作业项固定 1 条（阶段作业同样只 1 条）：事务化写入，避免中途失败留下半套作业
                 val ids = homeworkItemDao.insertAllInTransaction(items.map { it.toEntity() })
                 AddHomeworkResult.Success(items.mapIndexed { index, item -> item.copy(id = ids[index]) })
             },
@@ -203,10 +245,14 @@ class HomeworkRepositoryImpl @Inject constructor(
             return ScheduleUpdateResult.StatusTransitionDenied
         }
         val startMillis = startTime.toEpochMilli()
-        val deadlineCheck = HomeworkValidators.validateDeadline(
+        // 截止约束：**单一入口**——两类 deadline 语义（当天作业绝对时刻 / 阶段作业每日时刻）
+        // 的类型分流只发生在 HomeworkValidators 内部，本处（与时间设定页预校验）不得再自写一套，
+        // 否则「UI 先拦、仓库本会放行」这类判据分散的缺陷会复发
+        val deadlineCheck = HomeworkValidators.validateScheduleWithinItemDeadline(
+            item = domain,
             startMillis = startMillis,
             estimatedMinutes = estimatedMinutes,
-            deadlineMillis = domain.deadline?.toEpochMilli(),
+            zoneId = zoneId,
         )
         if (deadlineCheck is HomeworkValidation.Invalid) {
             return ScheduleUpdateResult.DeadlineExceeded
@@ -262,6 +308,8 @@ class HomeworkRepositoryImpl @Inject constructor(
         }
         val updated = domain.copy(startTime = null, estimatedMinutes = null, status = nextStatus)
         homeworkItemDao.update(updated.toEntity())
+        // 撤销排定的同时把「当天详情」回退（若该天此前已标记完成），避免每天详情残留已完成
+        recordDayProgress(updated, nextStatus, reset = true)
         return HomeworkOperationResult.Success(updated)
     }
 
@@ -322,19 +370,22 @@ class HomeworkRepositoryImpl @Inject constructor(
                 val check = HomeworkValidators.validateTypeChange(
                     type = type,
                     stageRange = stageRange,
-                    deadlineMillis = deadline?.toEpochMilli(),
                     creatorRole = domain.createdByRole,
-                    startEpochDay = startEpochDayOf(domain),
+                    dailyDeadlineTime = dailyDeadlineOf(type, deadline),
                 )
                 if (check is HomeworkValidation.Invalid) {
                     return@fold HomeworkOperationResult.TemplateInvalid(check.error)
                 }
-                // 新 deadline 必须同时容纳既有排定时间段（与 updateSchedule 同一套 deadline 约束）
+                // 候选 deadline 必须同时容纳既有排定时间段：与 updateSchedule 走**同一个**校验入口
+                // （按类型分流只发生在 HomeworkValidators 内；此处不再自写一套判据）。
+                // 用「候选类型 + 候选 deadline」构造候选作业项：阶段作业经 dailyDeadlineTime 解码每日时刻、
+                // 当天作业取绝对 deadline，语义与落库后的读回口径一致。
                 if (domain.startTime != null && domain.estimatedMinutes != null) {
-                    val scheduleCheck = HomeworkValidators.validateDeadline(
+                    val scheduleCheck = HomeworkValidators.validateScheduleWithinItemDeadline(
+                        item = domain.copy(type = type, deadline = deadline),
                         startMillis = domain.startTime.toEpochMilli(),
                         estimatedMinutes = domain.estimatedMinutes,
-                        deadlineMillis = deadline?.toEpochMilli(),
+                        zoneId = zoneId,
                     )
                     if (scheduleCheck is HomeworkValidation.Invalid) {
                         return@fold HomeworkOperationResult.TemplateInvalid(scheduleCheck.error)
@@ -343,7 +394,11 @@ class HomeworkRepositoryImpl @Inject constructor(
                 val updated = domain.copy(
                     type = type,
                     stageRange = if (type == HomeworkType.STAGE) stageRange else null,
-                    deadline = deadline,
+                    // **与新建路径同源编码**：阶段作业的 deadline 只承载每日时刻，
+                    // 必须把「阶段起始日（= 作业创建日）+ 每日时刻」编码进列，否则读回时
+                    // stageStartEpochDay 无法从编码还原、只能退回创建日兜底（口径漂移）。
+                    // 起始日使用业务时区口径的创建日（不依赖 ZoneId.systemDefault）。
+                    deadline = persistDeadline(type, deadline, domain.createdEpochDay(zoneId)),
                 )
                 homeworkItemDao.update(updated.toEntity())
                 HomeworkOperationResult.Success(updated)
@@ -381,19 +436,48 @@ class HomeworkRepositoryImpl @Inject constructor(
     override suspend fun startProgress(homeworkId: Long, sessionRole: Role): HomeworkStatusResult =
         transition(homeworkId, sessionRole, HomeworkStatus.IN_PROGRESS)
 
+    /**
+     * 标记完成：**按类型分流**（见类注释「完成」的两种语义）——
+     * 当天作业整条置已完成；阶段作业只完成「今天」并按每天进度收敛整条状态。
+     */
     override suspend fun complete(homeworkId: Long, sessionRole: Role): HomeworkStatusResult =
-        transition(homeworkId, sessionRole, HomeworkStatus.COMPLETED)
+        transition(
+            homeworkId = homeworkId,
+            sessionRole = sessionRole,
+            target = HomeworkStatus.COMPLETED,
+            onStage = { domain -> completeStageToday(domain) },
+        )
 
+    /**
+     * 撤销完成：当天作业回退为进行中；阶段作业撤销的是**今天**的完成记录并回到「待完成」
+     * （与 [complete] 的收敛口径对称，保证「今天还没做完」时能直接再次开始计时）。
+     */
     override suspend fun reopen(homeworkId: Long, sessionRole: Role): HomeworkStatusResult =
-        transition(homeworkId, sessionRole, HomeworkStatus.IN_PROGRESS)
+        transition(
+            homeworkId = homeworkId,
+            sessionRole = sessionRole,
+            // 当天作业：除状态回退为进行中外，「当天详情」也必须回退（见 resetDayRecord）
+            target = HomeworkStatus.IN_PROGRESS,
+            resetDayRecord = true,
+            onStage = { domain -> reopenStageToday(domain) },
+        )
 
     // ---- 私有工具 ----
 
-    /** 统一状态流转入口：会话有效性 + 执行权 + 归属围栏 → 流转合法性校验 → 落库 */
+    /**
+     * 统一状态流转入口：会话有效性 + 执行权 + 归属围栏 → 流转合法性校验 → 落库。
+     *
+     * @param resetDayRecord 是否把「当天详情」回退为「未开始」（撤销完成场景；仅对目标进行中生效），
+     *   与 [startProgress] 区分：同样是「→ 进行中」，开始作业要写进行中，撤销完成要清掉今天的完成记录
+     * @param onStage 阶段作业的专用分支（完成/撤销完成按「今天」表达，见类注释「完成」的两种语义）；
+     *   为 null 时阶段作业与非阶段作业走同一套整条状态流转（如 markPending / startProgress）
+     */
     private suspend fun transition(
         homeworkId: Long,
         sessionRole: Role,
         target: HomeworkStatus,
+        resetDayRecord: Boolean = false,
+        onStage: (suspend (HomeworkItem) -> HomeworkStatusResult)? = null,
     ): HomeworkStatusResult =
         // 执行权：学生可推进本人名下（含家长布置的）作业状态：待完成 → 进行中 → 已完成
         readAuthorized(homeworkId, sessionRole) { item ->
@@ -402,19 +486,125 @@ class HomeworkRepositoryImpl @Inject constructor(
             onNotFound = { HomeworkStatusResult.NotFound },
             onDenied = { HomeworkStatusResult.PermissionDenied },
             onAllowed = { domain ->
-                when {
-                    !HomeworkValidators.canTransition(domain.status, target) ->
-                        HomeworkStatusResult.IllegalTransition(domain.status, target)
-
-                    domain.status == target -> HomeworkStatusResult.Success(domain)
-                    else -> {
-                        val updated = domain.copy(status = target)
-                        homeworkItemDao.update(updated.toEntity())
-                        HomeworkStatusResult.Success(updated)
-                    }
+                if (domain.isStage && onStage != null) {
+                    onStage(domain)
+                } else {
+                    advance(domain, target, resetDayRecord)
                 }
             },
         )
+
+    /**
+     * 按目标状态推进**整条**作业项并同步「当天详情」（当天作业与阶段作业的通用路径）。
+     *
+     * 合法性与幂等口径：非法流转返回 [HomeworkStatusResult.IllegalTransition]；
+     * 同状态视为幂等成功，但仍要保证当天详情与目标状态一致
+     * （否则首次开始后中断重试会丢失每天详情）。
+     */
+    private suspend fun advance(
+        domain: HomeworkItem,
+        target: HomeworkStatus,
+        resetDayRecord: Boolean = false,
+    ): HomeworkStatusResult = when {
+        !HomeworkValidators.canTransition(domain.status, target) ->
+            HomeworkStatusResult.IllegalTransition(domain.status, target)
+
+        domain.status == target -> {
+            recordDayProgress(domain, target, reset = resetDayRecord)
+            HomeworkStatusResult.Success(domain)
+        }
+
+        else -> {
+            val updated = domain.copy(status = target)
+            homeworkItemDao.update(updated.toEntity())
+            // 落到 core 的「作业每天详情」：
+            // - 撤销完成（reopen）→ 回退「未开始」且清空执行数据；
+            // - 开始 → 当天详情置「进行中」；完成 → 「已完成」并记录完成时刻
+            recordDayProgress(updated, target, reset = resetDayRecord)
+            HomeworkStatusResult.Success(updated)
+        }
+    }
+
+    /**
+     * 阶段作业「完成今天的作业」：**只把今天记进每天详情**，整条状态按每天进度收敛。
+     *
+     * 收敛规则（见类注释）：阶段覆盖日全部完成 → 整条已完成；否则回到「待完成」，
+     * 使学生第二天（以及阶段范围内任意一天）可以直接开始计时，无需先「撤销完成」。
+     * 阶段窗口外（今天不在覆盖区间内）拒绝本次完成，避免写入边界不明的每天详情。
+     *
+     * @return [HomeworkStatusResult.Success] 携带**收敛后**的作业项（阶段未走完时状态为 PENDING）
+     */
+    private suspend fun completeStageToday(domain: HomeworkItem): HomeworkStatusResult {
+        if (!HomeworkValidators.canTransition(domain.status, HomeworkStatus.COMPLETED)) {
+            return HomeworkStatusResult.IllegalTransition(domain.status, HomeworkStatus.COMPLETED)
+        }
+        if (domain.status == HomeworkStatus.COMPLETED) {
+            // 整条已完成（阶段范围内全部天完成）：重复完成幂等成功，不改动任何数据
+            return HomeworkStatusResult.Success(domain)
+        }
+        if (!isTodayWithinStageWindow(domain)) {
+            // 阶段尚未开始或已结束：今天不属于该阶段，没有「今天的作业」可完成
+            return HomeworkStatusResult.IllegalTransition(domain.status, HomeworkStatus.COMPLETED)
+        }
+        // 1) 「今天的完成」落到 core 的作业每天详情
+        recordDayProgress(domain, HomeworkStatus.COMPLETED, reset = false)
+        // 2) 整条状态按每天进度收敛（全部覆盖日完成才置已完成）
+        return convergeStageStatus(domain)
+    }
+
+    /**
+     * 阶段作业「撤销今天的完成」：今天回到「未开始」并清空执行数据，整条随之回到「待完成」。
+     *
+     * 与 [completeStageToday] 对称：撤销后今天仍可直接开始计时（PENDING 在 timer 可开始集合内）。
+     * 只在今天已有完成记录时才有意义，故无完成记录时返回 [HomeworkStatusResult.IllegalTransition]。
+     */
+    private suspend fun reopenStageToday(domain: HomeworkItem): HomeworkStatusResult {
+        val today = currentEpochDay()
+        val completedToday = dailyRecordRepository.find(domain.id, today)?.status == HomeworkDayStatus.COMPLETED
+        if (!completedToday) {
+            return HomeworkStatusResult.IllegalTransition(domain.status, HomeworkStatus.IN_PROGRESS)
+        }
+        recordDayProgress(domain, HomeworkStatus.IN_PROGRESS, reset = true)
+        // 撤销今天的完成 → 整条不再满足「全部天完成」，收敛回「待完成」（今天照常可开始/完成）
+        val updated = domain.copy(status = HomeworkStatus.PENDING)
+        if (updated.status != domain.status) {
+            homeworkItemDao.update(updated.toEntity())
+        }
+        return HomeworkStatusResult.Success(updated)
+    }
+
+    /**
+     * 阶段作业整条状态的进度收敛：阶段覆盖日全部完成 → [HomeworkStatus.COMPLETED]，
+     * 否则 [HomeworkStatus.PENDING]（「整条还没走完」，仍可继续下一天开始计时）。
+     *
+     * 进度分母与分子与清单页同源（[StageDayRecords.progressOf]），因此「整条已完成」与
+     * 家长端「已完成历史」分组判定不会出现两套口径。
+     */
+    private suspend fun convergeStageStatus(domain: HomeworkItem): HomeworkStatusResult {
+        val records = dailyRecordRepository.loadByHomework(domain.id)
+        val progress = StageDayRecords.progressOf(domain, records, currentEpochDay(), zoneId)
+        val nextStatus = if (progress?.isAllCompleted == true) {
+            HomeworkStatus.COMPLETED
+        } else {
+            HomeworkStatus.PENDING
+        }
+        val updated = domain.copy(status = nextStatus)
+        if (updated.status != domain.status) {
+            homeworkItemDao.update(updated.toEntity())
+        }
+        return HomeworkStatusResult.Success(updated)
+    }
+
+    /**
+     * 今天是否落在该阶段作业的覆盖区间内（[StageDayRecords.isWithinCoverage] 同一口径）：
+     * 起始日经 [HomeworkItem.stageStartEpochDayOr] 还原（编码不可还原时回退创建日），
+     * 覆盖天数缺失（脏数据：type = STAGE 但无阶段范围）时返回 false，宁可拒绝也不写入边界不明的详情。
+     */
+    private fun isTodayWithinStageWindow(domain: HomeworkItem): Boolean {
+        // 阶段作业的 stageStartEpochDayOr 恒非空（不可还原时回退创建日），兜底仅为类型完备
+        val start = domain.stageStartEpochDayOr(zoneId) ?: domain.createdEpochDay(zoneId)
+        return StageDayRecords.isWithinCoverage(currentEpochDay(), start, domain.stageCoveredDays)
+    }
 
     // ---- 统一访问判定（会话有效性 + 权限维度 + 家长归属围栏） ----
 
@@ -515,9 +705,127 @@ class HomeworkRepositoryImpl @Inject constructor(
         is TargetAccess.Allowed -> onAllowed(item)
     }
 
-    /** 作业的归属日（epochDay）：阶段作业展开日已在写入时固化，此处以创建时刻所在日为准做范围校验 */
-    private fun startEpochDayOf(domain: HomeworkItem): Long =
-        HomeworkValidators.epochDayOf(domain.createdAt.toEpochMilli(), zoneId)
+    /** 「今天」的业务自然日（每天详情的自然日键，统一走业务时区折算，禁止 UTC 毫秒折算） */
+    private fun currentEpochDay(): Long =
+        HomeworkValidators.epochDayOf(clock.currentTimeMillis(), zoneId)
+
+    /**
+     * 候选 deadline 的「每日截止时刻」（仅阶段作业有意义）：
+     * 阶段作业的 deadline 只承载 time-of-day，由 [HomeworkDailyDeadlineCodec] 解码；
+     * 当天作业或空 deadline 返回 null（无每日时刻约束）。
+     */
+    private fun dailyDeadlineOf(type: HomeworkType, deadline: Instant?): LocalTime? =
+        if (type == HomeworkType.STAGE) {
+            deadline?.toEpochMilli()?.let(HomeworkDailyDeadlineCodec::decodeStageDaily)
+        } else {
+            null
+        }
+
+    /**
+     * 落库 deadline 取值（**新建与编辑两条路径同源**）：
+     * - 当天作业（TODAY）：绝对时刻原样落库；
+     * - 阶段作业（STAGE）：把「阶段起始日 + 每日时刻」编码进列（与 [HomeworkTemplate.toItems] 一致），
+     *   保证读回时 [HomeworkItem.stageStartEpochDay] 可由编码还原而非兜底。
+     *
+     * @param startEpochDay 阶段起始日（业务时区口径的作业创建日）
+     */
+    private fun persistDeadline(
+        type: HomeworkType,
+        deadline: Instant?,
+        startEpochDay: Long,
+    ): Instant? = if (type == HomeworkType.STAGE) {
+        dailyDeadlineOf(type, deadline)?.let { time ->
+            HomeworkDailyDeadlineCodec.encodeStageDaily(startEpochDay, time)
+        }
+    } else {
+        deadline
+    }
+
+    /**
+     * 状态流转落库后同步「作业每天详情」（core 契约，按业务时区折算自然日；仓库不直接碰 DAO）：
+     * - 开始（目标进行中且 [reset] = false）→ 当天详情置「进行中」并记录开始时刻；
+     * - 完成（目标已完成）→ 当天详情置「已完成」并记录完成时刻；
+     * - 撤销完成 / 撤销排定（[reset] = true）→ 当天详情置回「未开始」并清空执行数据
+     *   （不补做已过去的缺卡天；同一天重新开始会再次写入进行中）；
+     * - 其余目标状态（如「待完成」）：**不写每天详情**——「已记录 → 待完成」只表达「已排定时间」，
+     *   与「今天做了什么」无关（此前此处误落「已完成」，会把没做过的一天记成已完成，
+     *   进而污染阶段进度与「全部天完成」判定）。
+     *
+     * 每天详情未注入真实实现（仅传清单替身的既有测试）时经 [NoopDailyRecordRepository] 空转，口径不变。
+     */
+    private suspend fun recordDayProgress(
+        domain: HomeworkItem,
+        target: HomeworkStatus,
+        reset: Boolean,
+    ) {
+        val records = dailyRecordRepository
+        val todayEpochDay = currentEpochDay()
+        val nowMillis = clock.currentTimeMillis()
+        when {
+            reset || target == HomeworkStatus.RECORDED -> {
+                val id = records.upsertStatus(
+                    homeworkId = domain.id,
+                    studentId = domain.studentId,
+                    epochDay = todayEpochDay,
+                    status = HomeworkDayStatus.NOT_STARTED,
+                    nowMillis = nowMillis,
+                )
+                records.updateExecution(
+                    id = id,
+                    startedAtMillis = null,
+                    estimatedMinutes = null,
+                    actualMinutes = null,
+                    pauseCount = 0,
+                    pausedTotalMinutes = 0,
+                    finishedAtMillis = null,
+                )
+            }
+
+            target == HomeworkStatus.IN_PROGRESS -> {
+                val id = records.upsertStatus(
+                    homeworkId = domain.id,
+                    studentId = domain.studentId,
+                    epochDay = todayEpochDay,
+                    status = HomeworkDayStatus.IN_PROGRESS,
+                    nowMillis = nowMillis,
+                )
+                val existing = records.find(domain.id, todayEpochDay)
+                records.updateExecution(
+                    id = id,
+                    startedAtMillis = existing?.startedAtMillis ?: nowMillis,
+                    estimatedMinutes = domain.estimatedMinutes ?: existing?.estimatedMinutes,
+                    actualMinutes = existing?.actualMinutes,
+                    pauseCount = existing?.pauseCount ?: 0,
+                    pausedTotalMinutes = existing?.pausedTotalMinutes ?: 0,
+                    finishedAtMillis = null,
+                )
+            }
+
+            target == HomeworkStatus.COMPLETED -> {
+                val id = records.upsertStatus(
+                    homeworkId = domain.id,
+                    studentId = domain.studentId,
+                    epochDay = todayEpochDay,
+                    status = HomeworkDayStatus.COMPLETED,
+                    nowMillis = nowMillis,
+                )
+                val existing = records.find(domain.id, todayEpochDay)
+                records.updateExecution(
+                    id = id,
+                    startedAtMillis = existing?.startedAtMillis,
+                    estimatedMinutes = existing?.estimatedMinutes ?: domain.estimatedMinutes,
+                    actualMinutes = existing?.actualMinutes,
+                    pauseCount = existing?.pauseCount ?: 0,
+                    pausedTotalMinutes = existing?.pausedTotalMinutes ?: 0,
+                    finishedAtMillis = nowMillis,
+                )
+            }
+
+            // 其余目标状态（「已记录 → 待完成」的 PENDING）：不写每天详情——该流转只表达
+            // 「已排定时间」，与「今天做了什么」无关（口径见 KDoc）
+            else -> Unit
+        }
+    }
 
     /** 交换两条作业项的优先级（上移/下移的基本操作） */
     private suspend fun swapPriority(first: HomeworkItemEntity, second: HomeworkItemEntity) {

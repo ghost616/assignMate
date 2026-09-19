@@ -61,12 +61,19 @@ import java.time.LocalDate
  * 会话失效（role 为 null）沿用既有会话失效处理，不额外引导。
  *
  * 说明：相机/录音真实行为需在真机验证；FileProvider 声明由 framework 计划补全。
+ *
+ * [onSaved] 携带**新建作业项的真实 id**（阶段作业即那一条作业项的 id；非正数 = 拿不到 id），
+ * 供 framework 对新建作业按 id 精确同步逐日提醒（不必再退化为「按整份清单纠正」）。
+ *
+ * 保存成功后的时序：**先执行 [onSaved]**（立即回清单 + 按 id 同步提醒），再以非挂起方式把
+ * 「保存成功」文案写入 [homeworkSaveNotice]，由清单页在导航后展示——本页**不再** await 提示条
+ * （详见 [dispatchSaveCompletion] 与 [HomeworkSaveNoticeHolder] 的取舍说明）。
  */
 @Composable
 fun HomeworkEntryRoute(
     studentId: Long,
     onBack: () -> Unit,
-    onSaved: () -> Unit,
+    onSaved: (Long) -> Unit,
     modifier: Modifier = Modifier,
     onGoToOcrSettings: (() -> Unit)? = null,
     viewModel: HomeworkEntryViewModel = hiltViewModel(),
@@ -114,10 +121,16 @@ fun HomeworkEntryRoute(
                     )
                 }
 
-                is HomeworkEntryEvent.Saved -> {
-                    snackbarHostState.showSnackbar(event.message, duration = SnackbarDuration.Long)
-                    onSaved()
-                }
+                is HomeworkEntryEvent.Saved -> dispatchSaveCompletion(
+                    // 保存成功文案经跨页一次性暂存由**清单页**展示（本页即将随导航离开组合）
+                    dispatchMessage = event.message,
+                    saveNotice = homeworkSaveNotice,
+                    // 回抛新建作业项的真实 id（非正数 = 拿不到 id）：framework 据此对新建作业
+                    // 按 id 精确同步逐日提醒，替代「按整份清单纠正」的兜底口径。
+                    // **必须先执行本回调**：修复前此处先 await 提示条（Long 约 10 秒），
+                    // 用户要等提示结束才回得到清单，且提示期间离开组合会让本回调连同提醒同步被取消。
+                    onSaved = { onSaved(event.homeworkId) },
+                )
 
                 is HomeworkEntryEvent.ShowMessage -> snackbarHostState.showSnackbar(
                     message = event.message,
@@ -474,33 +487,54 @@ private fun EntryForm(
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = "覆盖：${LocalDate.ofEpochDay(uiState.todayEpochDay)} 至 " +
-                        "${LocalDate.ofEpochDay(uiState.lastEpochDay)}（每天一条、可逐日完成）",
+                        "${LocalDate.ofEpochDay(uiState.lastEpochDay)}（每天到点截止）",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             if (uiState.deadlineEditable) {
                 Spacer(modifier = Modifier.height(10.dp))
-                Text(text = "截止时间（家长设置）", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    text = if (uiState.type == HomeworkType.STAGE) {
+                        "每日截止时刻（家长设置）"
+                    } else {
+                        "截止时间（家长设置）"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                )
                 Spacer(modifier = Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = uiState.deadlineDate,
-                        onValueChange = callbacks.onDeadlineDateChange,
-                        modifier = Modifier.weight(1f),
-                        label = { Text("日期") },
-                        placeholder = { Text("2025-01-02") },
-                        singleLine = true,
-                        isError = uiState.deadlineError != null,
-                    )
+                    // 阶段作业：只填时刻（每天到这个时刻截止），不出现日期输入
+                    if (uiState.type != HomeworkType.STAGE) {
+                        OutlinedTextField(
+                            value = uiState.deadlineDate,
+                            onValueChange = callbacks.onDeadlineDateChange,
+                            modifier = Modifier.weight(1f),
+                            label = { Text("日期") },
+                            placeholder = { Text("2025-01-02") },
+                            singleLine = true,
+                            isError = uiState.deadlineError != null,
+                        )
+                    }
                     OutlinedTextField(
                         value = uiState.deadlineTime,
                         onValueChange = callbacks.onDeadlineTimeChange,
                         modifier = Modifier.weight(1f),
-                        label = { Text("时间") },
+                        label = {
+                            Text(text = if (uiState.type == HomeworkType.STAGE) "每日时刻" else "时间")
+                        },
                         placeholder = { Text("21:00") },
                         singleLine = true,
                         isError = uiState.deadlineError != null,
+                    )
+                }
+                if (uiState.type == HomeworkType.STAGE) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        // 文案与仓库校验同源（家长录入必填 / 学生录入可留空），不在此重复字面量
+                        text = stageDailyDeadlineHint(uiState.ownerRole),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 if (uiState.deadlineError != null) {

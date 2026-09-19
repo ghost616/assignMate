@@ -22,3 +22,6 @@ Thumbs.db
 
 # DSH 模块代理元数据（不入库）
 .module_agent/
+
+# 测试隔离工作区（离朱/验证用的整仓副本，含独立 build 产物，不入库）
+.lizhu_env/

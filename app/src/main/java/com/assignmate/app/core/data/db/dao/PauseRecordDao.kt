@@ -1,4 +1,4 @@
-﻿package com.assignmate.app.core.data.db.dao
+package com.assignmate.app.core.data.db.dao
 
 import androidx.room.Dao
 import androidx.room.Query
@@ -32,6 +32,16 @@ interface PauseRecordDao : BaseDao<PauseRecordEntity> {
             "ORDER BY pause_start_at ASC",
     )
     suspend fun loadByHomework(homeworkId: Long): List<PauseRecordEntity>
+
+    /**
+     * 读取某作业某业务自然日的暂停明细（按暂停开始时刻升序），供「某作业某天」的暂停统计。
+     * epochDay 由调用方按业务时区折算后传入（禁止 UTC 毫秒折算）。
+     */
+    @Query(
+        "SELECT * FROM pause_record WHERE homework_id = :homeworkId AND epoch_day = :epochDay " +
+            "ORDER BY pause_start_at ASC",
+    )
+    suspend fun loadByHomeworkAndDay(homeworkId: Long, epochDay: Long): List<PauseRecordEntity>
 
     /**
      * 查询某会话中未结束的暂停记录（pause_end_at 为 NULL，返回 null 表示当前未暂停）。

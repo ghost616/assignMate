@@ -335,6 +335,8 @@ class TimerSessionOwnershipFenceTest {
             homeworkId = homeworkId,
             studentId = studentId,
             parentAccountId = TimerTestEnv.PARENT_ID,
+            // 本用例只验证归属围栏（不涉及逐日归属），按「未指定」哨兵 0 显式构造
+            epochDay = UNSPECIFIED_EPOCH_DAY,
             startedAt = Instant.ofEpochMilli(clock.currentTimeMillis()),
             finishedAt = null,
             pausedTotalMillis = 0L,
@@ -349,6 +351,8 @@ class TimerSessionOwnershipFenceTest {
             PauseRecordEntity(
                 sessionId = sessionId,
                 homeworkId = homeworkId,
+                // 未结束暂停明细同样按「未指定」哨兵显式构造（实体已无 Kotlin 默认值）
+                epochDay = UNSPECIFIED_EPOCH_DAY,
                 pauseStartAt = Instant.ofEpochMilli(clock.currentTimeMillis()),
                 pauseEndAt = null,
             ),
@@ -368,6 +372,7 @@ class TimerSessionOwnershipFenceTest {
             authRepository = authRepository,
             clock = clock,
             transactionRunner = transactionRunner,
+            dailyRecordRepository = dailyRecordRepository,
         )
 
     private companion object {
@@ -377,5 +382,8 @@ class TimerSessionOwnershipFenceTest {
 
         /** 另一位学生（不属于 [TimerTestEnv.PARENT_ID] 名下） */
         const val OTHER_STUDENT_ID = 99L
+
+        /** `epoch_day` 的「未指定」哨兵（列默认值 0）：仅用于构造不涉及逐日归属的测试数据 */
+        const val UNSPECIFIED_EPOCH_DAY = 0L
     }
 }
