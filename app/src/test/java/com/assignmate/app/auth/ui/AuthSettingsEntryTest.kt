@@ -16,10 +16,13 @@ import org.junit.Test
  * 1. 入口回调可被触发：ParentHomeActions.onOpenSettings / StudentHomeActions.onOpenThemeSettings
  *    点击即回调；未接线（默认空实现）下点击不抛异常、不误触发其它动作、既有入口行为不变。
  * 2. Route 接线契约：
- *    - JVM 位置签名：新回调以 Function0 形态紧随 onEnterHomework（位于 Modifier 之前）；
+ *    - JVM 位置签名：设置类回调以 Function0 形态紧随 onEnterHomework（位于 Modifier 之前）；
  *    - 源码声明：新增参数带 `= {}` 默认空实现，故 framework NavHost 旧调用点无需改动即可编译
  *      （Compose 路由函数不生成 Kotlin `$default` 合成方法，反射无法读取默认值，故按源码声明断言）；
- *    - 本次仅新增一个导航回调参数（不做「参数名为 onOpen*」之类的命名强约束）。
+ *    - 后续新增的「今日盘点」入口回调（家长侧 (Long) -> Unit、学生侧 () -> Unit）插在设置回调之后、
+ *      Modifier 之前，故本文件的参数个数/下标断言已同步到含该回调的最新契约；
+ *      该入口自身的契约由 AuthDaySummaryEntryTest 覆盖。
+ *    - 不做「参数名为 onOpen*」之类的命名强约束。
  * 3. 模块边界：auth 不依赖 settings 实现——auth/ui 源码无 settings 包 import，
  *    运行时类加载器也取不到 settings 类型。
  *
@@ -127,32 +130,38 @@ class AuthSettingsEntryTest {
     fun `家长中心路由在 onEnterHomework 之后新增无参设置回调`() {
         val parameters = routeParameters("ParentHomeScreenKt", "ParentHomeRoute")
 
-        assertEquals("家长中心路由参数个数应与接线契约一致", 9, parameters.size)
+        // 「今日盘点」入口（onOpenDaySummary: (Long) -> Unit）已插在 onOpenSettings 之后、Modifier 之前，
+        // 故家长中心路由合计 10 个参数；本用例只锚定设置回调的相对位置与类型。
+        assertEquals("家长中心路由参数个数应与接线契约一致", 10, parameters.size)
         assertEquals("参数 0 为会话失效回调", FUNCTION0, parameters[0])
         assertEquals("参数 1 为登出回调", FUNCTION0, parameters[1])
         assertEquals("参数 2 为进入作业回调", FUNCTION1, parameters[2])
-        assertEquals("参数 3（新增）应为无参设置回调", FUNCTION0, parameters[3])
-        assertEquals("参数 4 应为 Modifier", MODIFIER_NAME, parameters[4].name)
+        assertEquals("参数 3 为无参设置回调", FUNCTION0, parameters[3])
+        assertEquals("参数 4 为携带学生 id 的今日盘点回调", FUNCTION1, parameters[4])
+        assertEquals("参数 5 应为 Modifier", MODIFIER_NAME, parameters[5].name)
     }
 
     @Test
     fun `学生首页路由在 onEnterHomework 之后新增无参护眼设置回调`() {
         val parameters = routeParameters("StudentHomeScreenKt", "StudentHomeRoute")
 
-        assertEquals("学生首页路由参数个数应与接线契约一致", 8, parameters.size)
+        // 「今日盘点」入口（onOpenDaySummary: () -> Unit）已插在 onOpenThemeSettings 之后、Modifier 之前，
+        // 故学生首页路由合计 9 个参数；本用例只锚定护眼设置回调的相对位置与类型。
+        assertEquals("学生首页路由参数个数应与接线契约一致", 9, parameters.size)
         assertEquals("参数 0 为登出回调", FUNCTION0, parameters[0])
         assertEquals("参数 1 为进入作业回调", FUNCTION0, parameters[1])
-        assertEquals("参数 2（新增）应为无参护眼设置回调", FUNCTION0, parameters[2])
-        assertEquals("参数 3 应为 Modifier", MODIFIER_NAME, parameters[3].name)
+        assertEquals("参数 2 为无参护眼设置回调", FUNCTION0, parameters[2])
+        assertEquals("参数 3 为无参今日盘点回调", FUNCTION0, parameters[3])
+        assertEquals("参数 4 应为 Modifier", MODIFIER_NAME, parameters[4].name)
     }
 
     @Test
-    fun `两个首页路由仅新增一个导航回调参数`() {
+    fun `两个首页路由的回调参数下标连续且位于 Modifier 之前`() {
         val parentCallbacks = callbackParameterNumbers("ParentHomeScreenKt", "ParentHomeRoute")
         val studentCallbacks = callbackParameterNumbers("StudentHomeScreenKt", "StudentHomeRoute")
 
-        assertEquals("家长中心新增后共 4 个回调参数", listOf(0, 1, 2, 3), parentCallbacks)
-        assertEquals("学生首页新增后共 3 个回调参数", listOf(0, 1, 2), studentCallbacks)
+        assertEquals("家长中心当前共 5 个回调参数（含今日盘点）", listOf(0, 1, 2, 3, 4), parentCallbacks)
+        assertEquals("学生首页当前共 4 个回调参数（含今日盘点）", listOf(0, 1, 2, 3), studentCallbacks)
     }
 
     @Test
@@ -172,8 +181,8 @@ class AuthSettingsEntryTest {
         val studentCallbacks = functionFields(StudentHomeActions::class.java)
 
         assertEquals(
-            "学生首页动作集应恰好暴露三个入口",
-            setOf("onLogout", "onEnterHomework", "onOpenThemeSettings"),
+            "学生首页动作集应恰好暴露四个入口（含今日盘点）",
+            setOf("onLogout", "onEnterHomework", "onOpenThemeSettings", "onOpenDaySummary"),
             studentCallbacks,
         )
     }

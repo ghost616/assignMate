@@ -88,9 +88,15 @@ object HomeworkDailyDeadlineCodec {
     fun stageStartEpochDay(deadlineMillis: Long): Long =
         deadlineMillis.floorDiv(MILLIS_PER_DAY) - STAGE_ANCHOR_EPOCH_DAY
 
-    /** 当天作业的 deadline 折算为业务自然日（epochDay），用于「当天作业只在归属日展示」等口径 */
+    /**
+     * 当天作业的 deadline 折算为业务自然日（epochDay），用于「当天作业只在归属日展示」等口径。
+     *
+     * 折算走 `Instant.atZone(zoneId).toLocalDate()`（API 26 起可用）而**不用** `LocalDate.ofInstant`
+     * （Java 9 / Android API 31）：本工程 minSdk 29 且未启用 core library desugaring，
+     * API<31 设备会抛 NoSuchMethodError；二者语义逐字等价（同一时刻在同一时区下的自然日）。
+     */
     fun absoluteEpochDay(deadlineMillis: Long, zoneId: ZoneId): Long =
-        LocalDate.ofInstant(Instant.ofEpochMilli(deadlineMillis), zoneId).toEpochDay()
+        Instant.ofEpochMilli(deadlineMillis).atZone(zoneId).toLocalDate().toEpochDay()
 
     /** 某自然日 + 当日时刻的业务瞬时（阶段作业「该天到点」的判定基准） */
     fun instantAt(epochDay: Long, timeOfDay: LocalTime, zoneId: ZoneId): Instant =

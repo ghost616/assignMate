@@ -46,6 +46,12 @@ import kotlinx.coroutines.launch
  * 统一流程：识别/输入 → 可编辑文本（[HomeworkEntryUiState.content] 始终可手改）→
  * 选定类型/阶段范围/deadline（规则与 homework-A 一致）→ 保存进既有仓库（权限与校验同源）。
  *
+ * **作业类型按会话角色收敛**（需求：家长不再能添加当天作业）：家长会话可见的类型只有「阶段作业」
+ * （[HomeworkEntryUiState.availableTypes] 由 [homeworkTypeOptions] 推导，页面只渲染该列表，
+ * [onTypeChange] 亦拒绝对不可见类型的选择），并在角色异步到位后把表单默认收敛为
+ * 「阶段作业 + 一周 + 21:00」（[homeworkFormDefaults]，**幂等且不覆盖用户已改的选择**）；
+ * 学生会话保持「当天作业 / 阶段作业」两项、默认当天作业，行为逐字不变。
+ *
  * 「识别服务未配置」是唯一需要按会话角色分流的失败：家长可被引导去设置页，学生会话只提示
  * 「请让家长先配置识别服务」，绝不出现指向无权访问的设置页的文案（学生侧仍保留
  * 「图片已保存待重试」这一事实信息）。**收敛只有单层**——Snackbar 的文案与「去设置」动作
@@ -86,6 +92,15 @@ class HomeworkEntryViewModel @Inject constructor(
     /** 待重试任务数量（录入页入口展示，联网后批量重试）：统一走 [HomeworkOcrHandler] 口径 */
     val pendingCount: Flow<Int> = ocrHandler.observePendingCount()
 
+    /**
+     * 用户是否已显式改过表单字段（类型 / 阶段范围 / 每日时刻）。
+     *
+     * 会话角色在 [start] 中**异步**解析，而「家长只能录阶段作业」的默认值收敛发生在角色到位之后；
+     * 若不加区分地写回默认值就会覆盖用户已经改过的选择。故收敛时逐字段比对本标记
+     * （见 [homeworkFormDefaults] 的 `appliedTo`），使收敛**幂等且不覆盖用户选择**。
+     */
+    private var formTouched = HomeworkFormTouched()
+
     /** 初始化：准备会话与默认表单值 */
     fun start(studentId: Long, method: HomeworkEntryMethod = HomeworkEntryMethod.MANUAL) {
         if (_uiState.value.initialized) {
@@ -106,8 +121,26 @@ class HomeworkEntryViewModel @Inject constructor(
                 return@launch
             }
             val studentName = targetId.let { authRepository.getStudent(it)?.name }
-            _uiState.update {
-                it.copy(loading = false, studentId = targetId, role = role, studentName = studentName)
+            _uiState.update { state ->
+                // 角色异步到位后才收敛默认值：家长会话的可见类型只有「阶段作业」，
+                // 故默认收敛为「阶段作业 + 一周 + 21:00」（可直接保存）；学生取到的默认值
+                // 与既有初始值一致（当天作业 / 空），故学生端行为逐字不变。
+                // 仅对用户尚未改过的字段套用默认值（[formTouched]），故本收敛幂等且不覆盖用户选择。
+                val defaults = homeworkFormDefaults(role).appliedTo(
+                    type = state.type,
+                    stageRange = state.stageRange,
+                    deadlineTime = state.deadlineTime,
+                    touched = formTouched,
+                )
+                state.copy(
+                    loading = false,
+                    studentId = targetId,
+                    role = role,
+                    studentName = studentName,
+                    type = defaults.type,
+                    stageRange = defaults.stageRange,
+                    deadlineTime = defaults.deadlineTime,
+                )
             }
         }
     }
@@ -122,7 +155,16 @@ class HomeworkEntryViewModel @Inject constructor(
         _uiState.update { it.copy(method = method) }
     }
 
+    /**
+     * 切换作业类型：只接受当前会话**可见**的类型（家长会话只有「阶段作业」，
+     * 见 [homeworkTypeOptions]）——越界选择直接忽略，与页面只渲染 `availableTypes` 同口径。
+     */
     fun onTypeChange(type: HomeworkType) {
+        if (type !in homeworkTypeOptions(currentRole())) {
+            return
+        }
+        // 记录「用户已显式改过类型」：角色异步到位后的默认值收敛不得覆盖本次选择
+        formTouched = formTouched.copy(type = true)
         _uiState.update {
             it.copy(
                 type = type,
@@ -134,6 +176,7 @@ class HomeworkEntryViewModel @Inject constructor(
     }
 
     fun onStageRangeChange(range: StageRange) {
+        formTouched = formTouched.copy(stageRange = true)
         _uiState.update { it.copy(stageRange = range, stageError = null, deadlineError = null) }
     }
 
@@ -142,6 +185,7 @@ class HomeworkEntryViewModel @Inject constructor(
     }
 
     fun onDeadlineTimeChange(value: String) {
+        formTouched = formTouched.copy(deadlineTime = true)
         _uiState.update { it.copy(deadlineTime = value, deadlineError = null) }
     }
 
@@ -556,6 +600,16 @@ data class HomeworkEntryUiState(
 
     /** 截止时间是否可编辑（仅家长） */
     val deadlineEditable: Boolean get() = role == Role.PARENT
+
+    /**
+     * 当前会话**可见**的作业类型（页面据此渲染类型选项，是唯一的选项来源）：
+     * - 家长会话：只有「阶段作业」（需求：去掉家长的当天作业添加）；
+     * - 学生会话：两项（当天作业 / 阶段作业），默认当天作业（学生端行为不变）。
+     *
+     * 与 [HomeworkEntryViewModel.onTypeChange] 的越界拒绝共用 [homeworkTypeOptions]，
+     * 与编辑页 [HomeworkTemplateUiState.availableTypes] 亦同源。
+     */
+    val availableTypes: List<HomeworkType> get() = homeworkTypeOptions(role)
 
     /**
      * 本次录入的**录入者角色**（由会话角色推导，与 [HomeworkEntryViewModel.onSubmit] 构造

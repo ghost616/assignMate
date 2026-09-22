@@ -47,7 +47,7 @@ import java.time.Instant
 
 /**
  * 家长主界面：学生档案卡片列表 + 添加（≤5 拦截）+ 改名 + 重置/修改验证码 +
- * 删除确认 + “进入某学生作业界面” + 标题区「设置」入口。
+ * 删除确认 + “进入某学生作业界面” + 卡片「今日盘点」入口 + 标题区「设置」入口。
  *
  * @param onEnterHomework 进入某学生作业界面：回调携带被选学生 id（家长会话本身无 studentId，
  *   必须显式传递），由 NavHost 以 studentId 参数导航到 homework 作业清单；
@@ -55,6 +55,9 @@ import java.time.Instant
  * @param onOpenSettings 打开设置页：仅暴露导航意图（本模块不依赖 settings 实现，
  *   亦不 import settings 包），由 NavHost 注入 settings 路由的跳转；
  *   默认空实现，未接线时点「设置」为无操作，不崩溃。
+ * @param onOpenDaySummary 打开某学生的「今日盘点」页：同样只暴露导航意图（本模块不依赖 stats 实现，
+ *   亦不 import stats 包），回调携带该卡片学生 id（家长会话无 studentId，须显式传递），
+ *   由 NavHost 注入 stats 当日盘点路由的跳转；默认空实现，未接线时点击无操作、不崩溃。
  */
 @Composable
 fun ParentHomeRoute(
@@ -62,6 +65,7 @@ fun ParentHomeRoute(
     onLoggedOut: () -> Unit,
     onEnterHomework: (Long) -> Unit = {},
     onOpenSettings: () -> Unit = {},
+    onOpenDaySummary: (Long) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: ParentHomeViewModel = hiltViewModel(),
 ) {
@@ -101,6 +105,7 @@ fun ParentHomeRoute(
         onEnterHomework = viewModel::onEnterHomework,
         onLogout = viewModel::onLogoutClick,
         onOpenSettings = onOpenSettings,
+        onOpenDaySummary = onOpenDaySummary,
     )
     Scaffold(
         modifier = modifier,
@@ -138,6 +143,8 @@ class ParentHomeActions(
     val onLogout: () -> Unit,
     /** 打开设置页：导航意图回调（settings 实现在其自身模块，本模块不感知） */
     val onOpenSettings: () -> Unit = {},
+    /** 打开该学生的「今日盘点」页：导航意图回调，携带卡片学生 id（stats 实现在其自身模块，本模块不感知） */
+    val onOpenDaySummary: (Long) -> Unit = {},
 )
 
 /**
@@ -164,6 +171,7 @@ fun parentHomeActionsDefault(): ParentHomeActions = ParentHomeActions(
     onEnterHomework = {},
     onLogout = {},
     onOpenSettings = {},
+    onOpenDaySummary = {},
 )
 
 /** 家长主界面内容（无状态） */
@@ -322,6 +330,8 @@ private fun StudentCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 CardActionButton(text = "进入作业", onClick = { actions.onEnterHomework(student) })
+                // 「今日盘点」：进该学生的当日盘点页（导航意图外抛，stats 实现不在本模块）
+                CardActionButton(text = "今日盘点", onClick = { actions.onOpenDaySummary(student.id) })
                 CardActionButton(text = "改名", onClick = { actions.onRenameClick(student) })
                 CardActionButton(text = "验证码", onClick = { actions.onCodeClick(student) })
                 TextButton(onClick = { actions.onDeleteClick(student) }) {
@@ -485,7 +495,7 @@ private fun CodeDialog(
     )
 }
 
-/** 家长中心预览：用默认动作集渲染，便于查看标题区「设置」入口与卡片布局 */
+/** 家长中心预览：用默认动作集渲染，便于查看标题区「设置」入口与卡片操作行（含「今日盘点」）布局 */
 @Preview(showBackground = true)
 @Composable
 private fun ParentHomeContentPreview() {

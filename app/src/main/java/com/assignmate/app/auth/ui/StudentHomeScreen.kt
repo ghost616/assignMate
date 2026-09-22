@@ -27,20 +27,24 @@ import com.assignmate.app.core.ui.components.CoreLoadingPlaceholder
 import com.assignmate.app.core.ui.theme.AssignMateTheme
 
 /**
- * 学生端首页：展示“当前学生姓名/家长账号归属”等会话信息，并提供“进入我的作业”“护眼设置”入口
- * 与退出登录（回身份选择页）。
+ * 学生端首页：展示“当前学生姓名/家长账号归属”等会话信息，并提供“进入我的作业”“今日盘点”
+ * “护眼设置”入口与退出登录（回身份选择页）。
  *
  * @param onEnterHomework 进入我的作业：导航侧使用当前学生会话的 studentId 打开 homework
  *   作业清单（学生会话由“家长账号 + 验证码”进入时写入）；默认空实现，保证既有接线兼容。
  * @param onOpenThemeSettings 打开护眼设置：仅暴露导航意图（本模块不依赖 settings 实现，
  *   亦不 import settings 包），由 NavHost 注入 settings 路由的跳转；
  *   默认空实现，未接线时点「护眼设置」为无操作，不崩溃。
+ * @param onOpenDaySummary 打开我的「今日盘点」页：同样只暴露导航意图（本模块不依赖 stats 实现，
+ *   亦不 import stats 包），**无参**——盘点页按当前学生会话收敛为本人，无需传学生 id；
+ *   默认空实现，未接线时点击无操作、不崩溃。
  */
 @Composable
 fun StudentHomeRoute(
     onLoggedOut: () -> Unit,
     onEnterHomework: () -> Unit = {},
     onOpenThemeSettings: () -> Unit = {},
+    onOpenDaySummary: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: StudentHomeViewModel = hiltViewModel(),
 ) {
@@ -58,6 +62,7 @@ fun StudentHomeRoute(
             onLogout = viewModel::onLogoutClick,
             onEnterHomework = onEnterHomework,
             onOpenThemeSettings = onOpenThemeSettings,
+            onOpenDaySummary = onOpenDaySummary,
         ),
         modifier = modifier,
     )
@@ -65,13 +70,15 @@ fun StudentHomeRoute(
 
 /**
  * 学生端首页动作集（避免内容函数参数过长）：
- * 「进入我的作业」「护眼设置」「退出登录」三个入口均只承载导航/会话意图。
+ * 「进入我的作业」「今日盘点」「护眼设置」「退出登录」四个入口均只承载导航/会话意图。
  */
 class StudentHomeActions(
     val onLogout: () -> Unit,
     val onEnterHomework: () -> Unit,
     /** 打开护眼设置：导航意图回调（settings 实现在其自身模块，本模块不感知） */
     val onOpenThemeSettings: () -> Unit = {},
+    /** 打开本人的「今日盘点」页：导航意图回调（stats 实现在其自身模块，本模块不感知），无需传学生 id */
+    val onOpenDaySummary: () -> Unit = {},
 )
 
 /** 学生端首页动作集的默认实现：全部空实现，用于预览与未接线渲染（点击无操作、不崩溃） */
@@ -79,6 +86,7 @@ fun studentHomeActionsDefault(): StudentHomeActions = StudentHomeActions(
     onLogout = {},
     onEnterHomework = {},
     onOpenThemeSettings = {},
+    onOpenDaySummary = {},
 )
 
 /** 学生端首页内容（无状态） */
@@ -176,6 +184,14 @@ fun StudentHomeContent(
                 AssignMateBigButton(
                     text = "🌙 护眼设置",
                     onClick = actions.onOpenThemeSettings,
+                    containerColor = MaterialTheme.colorScheme.tertiary,
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                // 今日盘点入口：与「进入我的作业」「护眼设置」并列，仅回调导航意图（stats 实现不在本模块）。
+                // 无需传学生 id——盘点页按当前学生会话收敛为本人。
+                AssignMateBigButton(
+                    text = "📊 今日盘点",
+                    onClick = actions.onOpenDaySummary,
                     containerColor = MaterialTheme.colorScheme.tertiary,
                 )
                 Spacer(modifier = Modifier.height(24.dp))

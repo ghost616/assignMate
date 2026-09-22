@@ -42,6 +42,10 @@ import java.time.LocalDate
  * 手动录入 / 编辑作业模板页：输入内容 → 选类型（当天/阶段）→ 阶段作业选范围与截止时间 →
  * 保存后进入清单。提交时展示表单级错误提示（content/stage/deadline/form）。
  *
+ * 作业类型选项**按会话角色过滤**（来源唯一：[HomeworkTemplateUiState.availableTypes]，
+ * 与添加页同口径）：家长会话只渲染「阶段作业」，学生会话仍为「当天作业 / 阶段作业」两项；
+ * 家长新建时表单默认预填「阶段作业 + 一周 + 21:00」，可直接保存。
+ *
  * [onSaved] 携带本次保存对应的作业 id（编辑 = 被编辑作业；新建 = 新建作业项的真实 id；
  * 非正数 = 拿不到 id），供 framework 按 id 精确同步该作业的提醒。
  *
@@ -176,7 +180,9 @@ private fun TemplateForm(
             Text(text = "作业类型", style = MaterialTheme.typography.labelLarge)
             Spacer(modifier = Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                HomeworkType.entries.forEach { type ->
+                // 选项来源唯一：家长会话只有「阶段作业」，学生会话两项（见 availableTypes），
+                // 与添加页同口径；编辑存量「当天作业」时该类型不再出现在选项里（不做数据兼容）
+                uiState.availableTypes.forEach { type ->
                     FilterChip(
                         selected = uiState.type == type,
                         onClick = { callbacks.onTypeChange(type) },

@@ -55,6 +55,9 @@ import java.time.LocalDate
  *
  * 权限：拍照前申请 CAMERA、语音前申请 RECORD_AUDIO，拒绝时给出可读提示（引导去系统设置）。
  *
+ * 作业类型选项**按会话角色过滤**（来源唯一：[HomeworkEntryUiState.availableTypes]）：
+ * 家长会话只渲染「阶段作业」（家长不再能添加当天作业），学生会话仍为「当天作业 / 阶段作业」两项。
+ *
  * 「识别服务未配置」的引导按会话角色区分（口径为 [HomeworkEntryUiState.role]，源自 auth 会话）：
  * 家长会话渲染「去设置」按钮（经 [onGoToOcrSettings] 跳设置页），学生会话**不给**该入口
  * （学生无权维护厂商配置，否则会撞上无权访问的页面），改为就地提示「请让家长先配置识别服务」；
@@ -459,7 +462,8 @@ private fun EntryForm(
             Text(text = "作业类型", style = MaterialTheme.typography.labelLarge)
             Spacer(modifier = Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                HomeworkType.entries.forEach { type ->
+                // 选项来源唯一：家长会话只有「阶段作业」，学生会话两项（见 availableTypes）
+                uiState.availableTypes.forEach { type ->
                     FilterChip(
                         selected = uiState.type == type,
                         onClick = { callbacks.onTypeChange(type) },

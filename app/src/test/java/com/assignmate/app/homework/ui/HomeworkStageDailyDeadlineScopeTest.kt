@@ -56,6 +56,9 @@ import org.junit.Test
  * 4. 家长编辑**家长录入**的阶段作业（清空）→ 拦下且原每日时刻不变；
  * 5. 提示文案随录入者角色区分「必填 / 可留空」；
  * 6. 录入页（四种方式共用入口）同样口径：学生可留空保存、家长留空被拦。
+ *
+ * 注：家长阶段作业表单现已**预填**「一周 + 21:00」默认值（需求：降低必填项操作成本），
+ * 因此家长侧的「留空」用例需先经 `onDeadlineTimeChange("")` 清空预填值，再验证必填口径。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class HomeworkStageDailyDeadlineScopeTest {
@@ -120,6 +123,8 @@ class HomeworkStageDailyDeadlineScopeTest {
         viewModel.onContentChange("每天读课文")
         viewModel.onTypeChange(HomeworkType.STAGE)
         viewModel.onStageRangeChange(StageRange.ONE_WEEK)
+        // 家长阶段作业表单预填了「21:00」，本用例验证的是**留空**时的必填口径，故先显式清空
+        viewModel.onDeadlineTimeChange("")
         viewModel.onSubmit()
         advanceUntilIdle()
 
@@ -251,7 +256,7 @@ class HomeworkStageDailyDeadlineScopeTest {
         assertNull("学生录入可留空每日截止时刻", saved.single().deadline)
         assertEquals(CreatorRole.STUDENT, saved.single().creatorRole)
 
-        // 家长：留空必须被本地拦下且不触达仓库
+        // 家长：预填的「21:00」先清空——本用例验证的是**留空**必须被本地拦下且不触达仓库
         val parentRepository = mockk<HomeworkRepository>(relaxed = true)
         val parentViewModel = entryViewModel(Role.PARENT, parentRepository)
         parentViewModel.start(STUDENT_ID)
@@ -259,6 +264,7 @@ class HomeworkStageDailyDeadlineScopeTest {
         parentViewModel.onContentChange("每天读课文")
         parentViewModel.onTypeChange(HomeworkType.STAGE)
         parentViewModel.onStageRangeChange(StageRange.ONE_WEEK)
+        parentViewModel.onDeadlineTimeChange("")
         parentViewModel.onSubmit()
         advanceUntilIdle()
 

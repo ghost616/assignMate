@@ -87,8 +87,12 @@ data class HomeworkTemplate(
         HomeworkType.STAGE -> deadline?.let { daily ->
             // 阶段每日时刻是**钟面值**（time-of-day），与业务时区无关：
             // 入参由 [HomeworkDailyDeadlineCodec.timeOfDayCarrier] 以 UTC 锚定日承载，
-            // 故此处同样按 UTC 取出钟面值，避免经业务时区往返时发生 ±8 小时偏移
-            val time = LocalTime.ofInstant(daily, ZoneOffset.UTC)
+            // 故此处同样按 UTC 取出钟面值，避免经业务时区往返时发生 ±8 小时偏移。
+            // 取钟面值必须走 Instant.atZone（API 26 起可用），**不得**用 LocalTime.ofInstant
+            // （Java 9 / Android API 31）：本工程 minSdk 29 且未启用 core library desugaring，
+            // API<31 设备会抛 NoSuchMethodError——荣耀 V10（Android 10）上「保存阶段作业」
+            // 必现闪退的根因即此。二者语义逐字等价（同为零偏移下的钟面值，含纳秒精度）。
+            val time = daily.atZone(ZoneOffset.UTC).toLocalTime()
             HomeworkDailyDeadlineCodec.encodeStageDaily(startEpochDay, time)
         }
     }

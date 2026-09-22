@@ -38,7 +38,8 @@ import org.junit.Test
  * 因为录入/模板页的保存成功事件不携带新生成的作业 id。本类锁定两个入口的**真实 id 回抛**：
  *
  * 1. 录入页新建**阶段作业** → `HomeworkEntryEvent.Saved.homeworkId` = 那一条作业项的真实主键；
- * 2. 录入页新建**当天作业** → 同上（非占位 id）；
+ * 2. 录入页（**学生会话**）新建**当天作业** → 同上（非占位 id）；
+ *    注：家长会话只能录入阶段作业（默认收敛为阶段作业），故「当天作业」用例由学生端承担。
  * 3. 模板页新建作业 → `HomeworkTemplateEvent.SavedWithMessage.homeworkId` = 新作业项真实主键；
  * 4. 模板页编辑既有作业 → `HomeworkTemplateEvent.Saved.homeworkId` = 被编辑作业 id；
  * 5. 接线：两个 Route 的 `onSaved(Long)` 形参由事件 id 透传（framework 据此精确同步提醒）。
@@ -97,6 +98,9 @@ class HomeworkSavedEventHomeworkIdTest {
         val env = HomeworkTestEnv()
         val parentId = env.loginAsParent()
         val studentId = env.addStudent(parentId)
+        // 家长会话已不再能创建「当天作业」（默认收敛为阶段作业），本用例改由学生会话承担：
+        // 学生端保持「默认当天作业」的既有行为，事件仍须携带新建作业项的真实 id
+        env.loginAsStudent(parentId, studentId)
         val viewModel = entryViewModel(env)
         val events = mutableListOf<HomeworkEntryEvent>()
         val job = launch { viewModel.events.collect { events += it } }

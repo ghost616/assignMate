@@ -79,7 +79,15 @@ import javax.inject.Inject
  * - 清单状态无需手动刷新：清单页以仓库 `observeHomework` 单数据流驱动，
  *   计时/完成写库后返回清单即为最新状态（进行中 / 已完成）。
  *
- * 统计全链路（清单 → 当日盘点 → 单项详情 / 历史查询，两条入口链路同一条盘点路由）：
+ * 统计全链路（清单 / 家长中心 / 学生首页 → 当日盘点 → 单项详情 / 历史查询，四条入口链路共用同一条盘点路由）：
+ * - 家长中心学生卡片「今日盘点」：[ParentHomeRoute] 的 `onOpenDaySummary(studentId)` 携带该卡片学生 id
+ *   → [toStatsDaySummary]（家长会话本身无 studentId，故必须显式传递该学生）；
+ * - 学生首页「今日盘点」：[StudentHomeRoute] 的 `onOpenDaySummary()` **无参** → [toStatsDaySummary] 传
+ *   [AppDestination.UNSPECIFIED_STUDENT_ID]（0 = 未指定），由盘点页按当前学生会话收敛为本人 id
+ *   （忽略路由参数，防越权查看他人盘点）；
+ * - 上述两个入口与清单入口复用同一个 [toStatsDaySummary]（日期缺省 [StatsDestination.ARG_EPOCH_DAY_TODAY] = 盘点「今天」、
+ *   `fromHistory = false` 即 popUpTo([StatsDestination.DAY_SUMMARY], inclusive) 的替换语义，栈为 `[来源页, 盘点]`），
+ *   故均不新增路由、不新造返回栈规则，返回键一律回到来源页（家长中心 / 学生端首页）；
  * - 清单「查看盘点」：[HomeworkListRoute] 的 `onOpenStats(studentId)` 携带清单当前展示的学生
  *   （家长 = 被选学生、学生端 = 清单按会话解析出的本人 id）→ [toStatsDaySummary] 进 [StatsDestination.DAY_SUMMARY]，
  *   日期缺省（[StatsDestination.ARG_EPOCH_DAY_TODAY]）= 盘点「今天」；
@@ -201,6 +209,9 @@ fun AssignMateNavHost(
                 onEnterHomework = { studentId -> navController.toHomeworkList(studentId) },
                 // 「⚙ 设置」：进 settings 设置主页（二级页，返回键回本页）
                 onOpenSettings = { navController.toSettingsHome() },
+                // 学生卡片「今日盘点」：携带该卡片学生 id 进 stats 当日盘点页（日期缺省 = 「今天」哨兵），
+                // 返回键 popBackStack 回本家长中心（复用清单入口同一条 toStatsDaySummary，不新增路由/返回栈规则）
+                onOpenDaySummary = { studentId -> navController.toStatsDaySummary(studentId) },
             )
         }
         // ---- auth：学生端首页（学生进入成功或会话恢复后到达） ----
@@ -211,6 +222,11 @@ fun AssignMateNavHost(
                 onEnterHomework = { navController.toHomeworkList(AppDestination.UNSPECIFIED_STUDENT_ID) },
                 // 「🌙 护眼设置」：直达 settings 护眼设置页（家长与学生均可访问）
                 onOpenThemeSettings = { navController.toSettingsTheme() },
+                // 「今日盘点」：学生端无参回调，故传「未指定学生」哨兵（0），
+                // 由盘点页按当前学生会话收敛为本人 id（忽略路由参数，防越权查看他人盘点）；
+                // 与家长中心入口复用同一条 toStatsDaySummary（日期缺省 = 「今天」哨兵），
+                // 返回键 popBackStack 回本学生端首页，不新增路由、不新造返回栈规则
+                onOpenDaySummary = { navController.toStatsDaySummary(AppDestination.UNSPECIFIED_STUDENT_ID) },
             )
         }
         // ---- homework：作业清单（家长：路由参数指定学生；学生：参数被忽略，按会话解析本人） ----
@@ -620,23 +636,28 @@ private fun androidx.navigation.NavBackStackEntry.timerHomeworkIdArg(): Long =
     TimerDestination.homeworkIdOf(arguments?.getString(TimerDestination.ARG_HOMEWORK_ID))
 
 /**
- * 进入 stats 当日盘点页：
+ * 进入 stats 当日盘点页（四个入口共用）：
  * - 清单「查看盘点」：epochDay 缺省 [StatsDestination.ARG_EPOCH_DAY_TODAY]（盘点「今天」），
  *   返回栈语义为 `[清单, 盘点]`（替换栈中旧盘点实例，避免实例堆积）；
+ * - 家长中心「今日盘点」：携带该卡片学生 id，同上语义，栈为 `[家长中心, 盘点]`；
+ * - 学生首页「今日盘点」：携带 [AppDestination.UNSPECIFIED_STUDENT_ID]（0 = 未指定），
+ *   学生端回调本就无参，由盘点页按会话收敛为本人 id（防越权），栈为 `[学生首页, 盘点]`；
  * - 历史「查看这一天的盘点」：携带所选自然日，返回栈语义为 `[清单, 历史, 新盘点]`，
  *   返回键回到历史查询页（保留用户所选日期范围上下文）。
  *
- * studentId 由调用方给出（清单/历史页均已把目标学生解析到位），页面侧仍按会话再收敛一次：
- * 学生会话固定取本人 id，家长会话要求正数学生，故此处无需传「未指定」哨兵。
+ * studentId 由调用方给出（清单/历史/家长中心已把目标学生解析到位；学生首页传「未指定」哨兵），
+ * 页面侧仍按会话再收敛一次：学生会话固定取本人 id，家长会话要求正数学生。
+ * 三个非历史入口（清单 / 家长中心 / 学生首页）语义完全一致——日期缺省「今天」+ `fromHistory = false`，
+ * 故复用本方法而不另造导航路径与返回栈规则。
  *
  * 为什么是「移除旧实例 + 压入新实例」而不是复用栈中盘点页：NavBackStackEntry 的 arguments 在入栈时
  * 即固定，返回旧实例只会让页面按旧日期取数（盘点页 start 幂等，重进不会重取），
  * 用户会「在历史里选了昨天却看到今天的盘点」。故一律压入按新日期取数的新实例。
  *
- * 两个入口的差别只在「移除哪些旧实例」，由 [fromHistory] 区分，且两者都不产生回退环：
- * - [fromHistory] = false（清单入口，栈中盘点实例正好栈顶）：按路由模板
+ * 非历史入口与历史入口的差别只在「移除哪些旧实例」，由 [fromHistory] 区分，且都不产生回退环：
+ * - [fromHistory] = false（清单 / 家长中心 / 学生首页入口，盘点实例正好栈顶）：按路由模板
  *   popUpTo([StatsDestination.DAY_SUMMARY], inclusive = true) 连同其上页面一起移除后压入新实例；
- *   栈中没有盘点实例（首次从清单进入）时该 popUpTo 为无操作，等价于普通压栈。
+ *   栈中没有盘点实例（首次进入）时该 popUpTo 为无操作，等价于普通压栈。
  * - [fromHistory] = true（历史入口，盘点实例位于当前历史页之下）：若沿用 inclusive 弹出，
  *   会连带移除历史页（返回键只能回到清单），故改为 [removeDaySummaryInstances] 只清理历史页之上的
  *   旧盘点实例（如 `[清单, 旧盘点, 历史]` → `[清单, 历史]`），再普通压栈 → `[清单, 历史, 新盘点]`；
@@ -646,7 +667,7 @@ private fun androidx.navigation.NavBackStackEntry.timerHomeworkIdArg(): Long =
  * 把注册时的 route 原样保存在 `destination.route`（`setRoute` 仅另建 deep link 并用其 hashCode 作 id，
  * 不做占位符替换/默认值填充），故带查询参数的路由用模板串 popUpTo/popBackStack 可精确命中。
  *
- * @param studentId 目标学生 id（清单/历史页均已按会话解析到位）
+ * @param studentId 目标学生 id（清单 / 历史 / 家长中心已按会话解析到位；学生首页传「未指定」哨兵）
  * @param epochDay 盘点日期（纪元日）；缺省「今天」哨兵由页面按会话时区解析
  * @param fromHistory 是否来自历史查询页入口（true = 保留历史页在返回栈中）
  */

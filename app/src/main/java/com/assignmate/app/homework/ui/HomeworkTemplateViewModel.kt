@@ -44,6 +44,12 @@ import kotlinx.coroutines.launch
  *
  * 编辑模式（[HomeworkTemplateUiState.homeworkId] > 0）：内容两种角色均可改（学生仅限自己录入项）；
  * 类型/阶段范围/截止时间为家长专属（见 [HomeworkTemplateUiState.templateEditable]），学生会话下保持原值。
+ *
+ * **作业类型与默认值按会话角色收敛**（需求：家长不再能添加当天作业；添加页与编辑页同口径）：
+ * 家长会话可见的类型只有「阶段作业」（[HomeworkTemplateUiState.availableTypes] 由
+ * [homeworkTypeOptions] 推导，[onTypeChange] 亦拒绝对不可见类型的选择），新建时默认预填
+ * 「阶段作业 + 一周 + 21:00」（[homeworkFormDefaults]，幂等且不覆盖用户已改的选择）；
+ * 学生会话保持两项、默认当天作业。编辑既有作业一律以作业自身的取值为准（存量当天作业不做数据兼容）。
  */
 @HiltViewModel
 class HomeworkTemplateViewModel @Inject constructor(
@@ -58,6 +64,15 @@ class HomeworkTemplateViewModel @Inject constructor(
 
     private val _events = Channel<HomeworkTemplateEvent>(Channel.BUFFERED)
     val events: Flow<HomeworkTemplateEvent> = _events.receiveAsFlow()
+
+    /**
+     * 用户是否已显式改过表单字段（类型 / 阶段范围 / 每日时刻）。
+     *
+     * 会话角色在 [start] 中**异步**解析，而「家长只能录阶段作业 + 一周 + 21:00」的默认值收敛
+     * 发生在角色到位之后；若不加区分地写回默认值就会覆盖用户已经改过的选择。故收敛时逐字段
+     * 比对本标记（见 [homeworkFormDefaults] 的 `appliedTo`），使收敛**幂等且不覆盖用户选择**。
+     */
+    private var formTouched = HomeworkFormTouched()
 
     /** 初始化：读取会话与（可选）待编辑作业，准备表单初始值 */
     fun start(studentId: Long, homeworkId: Long = HomeworkConstants.INVALID_ID) {
@@ -86,6 +101,21 @@ class HomeworkTemplateViewModel @Inject constructor(
                 sendMessage("作业不存在，可能已被删除")
                 return@launch
             }
+            // 新建时的角色默认值：家长 = 阶段作业 + 一周 + 21:00（降低必填项操作成本）；
+            // 学生会话取到的默认值与既有初始值一致（当天作业 / 空），故学生端行为逐字不变。
+            // **编辑一律以既有作业的取值为准**，绝不套用默认值（否则会把用户的存量设置改掉）。
+            // 仅对用户尚未改过的字段套用（[formTouched]）→ 本收敛幂等且不覆盖用户已改的选择
+            // （角色在 start() 中异步解析，收敛发生在角色到位之后）。
+            val defaults = if (editing) {
+                null
+            } else {
+                homeworkFormDefaults(role).appliedTo(
+                    type = _uiState.value.type,
+                    stageRange = _uiState.value.stageRange,
+                    deadlineTime = _uiState.value.deadlineTime,
+                    touched = formTouched,
+                )
+            }
             _uiState.update { state ->
                 state.copy(
                     loading = false,
@@ -99,8 +129,10 @@ class HomeworkTemplateViewModel @Inject constructor(
                     // 录入者角色随作业读入：编辑时「每日截止时刻是否必填」按**作业的录入者**
                     // 判定（与仓库 updateTemplate / validateTypeChange 同一口径），新建时回落会话角色
                     createdByRole = item?.createdByRole,
-                    type = item?.type ?: HomeworkType.TODAY,
-                    stageRange = item?.stageRange,
+                    // 编辑存量作业时类型原样保留（**不做存量当天作业的数据兼容**：家长会话下该类型
+                    // 已不在选项列表内，但既有数据不被擅自改写）；新建时取角色默认值
+                    type = item?.type ?: defaults?.type ?: HomeworkType.TODAY,
+                    stageRange = if (editing) item?.stageRange else defaults?.stageRange,
                     // 阶段作业只填时刻（每日截止时刻，无日期）；当天作业仍为「日期 + 时刻」
                     deadlineDate = if (item != null && item.isStage) {
                         ""
@@ -109,8 +141,10 @@ class HomeworkTemplateViewModel @Inject constructor(
                     },
                     deadlineTime = if (item != null && item.isStage) {
                         item.dailyDeadlineTime?.let { time -> HomeworkDailyDeadlineCodec.formatTime(time) } ?: ""
-                    } else {
+                    } else if (editing) {
                         item?.deadline?.let { instantToTimeText(it, zoneId) } ?: ""
+                    } else {
+                        defaults?.deadlineTime ?: ""
                     },
                 )
             }
@@ -123,7 +157,16 @@ class HomeworkTemplateViewModel @Inject constructor(
         _uiState.update { it.copy(content = value, contentError = null, formError = null) }
     }
 
+    /**
+     * 切换作业类型：只接受当前会话**可见**的类型（家长会话只有「阶段作业」，
+     * 见 [homeworkTypeOptions]）——越界选择直接忽略，与页面只渲染 `availableTypes` 同口径。
+     */
     fun onTypeChange(type: HomeworkType) {
+        if (type !in homeworkTypeOptions(_uiState.value.role)) {
+            return
+        }
+        // 记录「用户已显式改过类型」：角色异步到位后的默认值收敛不得覆盖本次选择
+        formTouched = formTouched.copy(type = true)
         _uiState.update {
             it.copy(
                 type = type,
@@ -136,6 +179,7 @@ class HomeworkTemplateViewModel @Inject constructor(
     }
 
     fun onStageRangeChange(range: StageRange) {
+        formTouched = formTouched.copy(stageRange = true)
         _uiState.update { it.copy(stageRange = range, stageError = null, deadlineError = null) }
     }
 
@@ -144,6 +188,7 @@ class HomeworkTemplateViewModel @Inject constructor(
     }
 
     fun onDeadlineTimeChange(value: String) {
+        formTouched = formTouched.copy(deadlineTime = true)
         _uiState.update { it.copy(deadlineTime = value, deadlineError = null) }
     }
 
@@ -393,6 +438,16 @@ data class HomeworkTemplateUiState(
 
     /** 阶段覆盖的最后一天（阶段作业按所选范围推算，便于页面提示「覆盖至 X 月 X 日」） */
     val lastEpochDay: Long get() = stageRange?.lastEpochDay(todayEpochDay) ?: todayEpochDay
+
+    /**
+     * 当前会话**可见**的作业类型（页面据此渲染类型选项，是唯一的选项来源）：
+     * - 家长会话：只有「阶段作业」（需求：去掉家长的当天作业添加；添加页与编辑页同口径）；
+     * - 学生会话：两项（当天作业 / 阶段作业），新建默认当天作业（学生端行为不变）。
+     *
+     * 与 [HomeworkTemplateViewModel.onTypeChange] 的越界拒绝共用 [homeworkTypeOptions]，
+     * 与添加页 [HomeworkEntryUiState.availableTypes] 亦同源。
+     */
+    val availableTypes: List<HomeworkType> get() = homeworkTypeOptions(role)
 
     /**
      * 截止时间是否可编辑：新建时两种角色皆可设定；
